@@ -2013,10 +2013,21 @@ function VennOverlapCard({ decision, onResolve, resolving }) {
   })
 }
 
-function RadialGaugeDisplay({ value, min, max, unit }) {
+// size: 'default' (original, used by ModeRadialGaugeCard's larger card
+// display) or 'compact' (roughly half the visual footprint, used by
+// MetricDial inside the narrow MetricsSidebar). Only rendering constants
+// (radius/stroke/viewBox/text size) change between sizes — the arc-angle
+// math and the underlying value/fraction are identical either way.
+function RadialGaugeDisplay({ value, min, max, unit, size = 'default' }) {
+  const compact = size === 'compact'
   const cx = 100
   const cy = 100
-  const r = 80
+  const r = compact ? 78 : 80
+  const strokeWidth = compact ? 6 : 12
+  const viewBoxHeight = compact ? 50 : 110
+  const maxHeight = compact ? '65px' : '140px'
+  const valueTextClass = compact ? 'text-[0.6rem] font-semibold' : 'text-[1.1rem] font-semibold'
+  const valueTextY = compact ? cy - 4 : cy - 6
   const span = max - min
   const fraction = span > 0 ? Math.min(1, Math.max(0, (value - min) / span)) : 0
 
@@ -2039,29 +2050,29 @@ function RadialGaugeDisplay({ value, min, max, unit }) {
   const valuePath = `M ${start.x} ${start.y} A ${r} ${r} 0 0 1 ${valuePoint.x} ${valuePoint.y}`
 
   return jsxs('svg', {
-    viewBox: '0 0 200 110',
+    viewBox: `0 0 200 ${viewBoxHeight}`,
     className: 'w-full',
-    style: { maxHeight: '140px' },
+    style: { maxHeight },
     children: [
       jsx('path', {
         d: trackPath,
         fill: 'none',
         stroke: 'var(--ui-stroke-secondary)',
-        strokeWidth: 12,
+        strokeWidth,
         strokeLinecap: 'round',
       }),
       jsx('path', {
         d: valuePath,
         fill: 'none',
         stroke: 'var(--ui-accent)',
-        strokeWidth: 12,
+        strokeWidth,
         strokeLinecap: 'round',
       }),
       jsx('text', {
         x: cx,
-        y: cy - 6,
+        y: valueTextY,
         textAnchor: 'middle',
-        className: 'text-[1.1rem] font-semibold',
+        className: valueTextClass,
         fill: 'var(--ui-accent)',
         children: `${safeText(value)}${safeText(unit, '')}`,
       }),
@@ -2845,7 +2856,7 @@ function MetricDial({ label, value, min, max, unit, subtitle }) {
     children: [
       jsx('div', {
         className: 'w-full',
-        children: jsx(RadialGaugeDisplay, { value, min, max, unit }),
+        children: jsx(RadialGaugeDisplay, { value, min, max, unit, size: 'compact' }),
       }),
       jsx('div', { className: 'text-center text-[0.7rem] font-medium', children: label }),
       subtitle
