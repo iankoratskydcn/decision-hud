@@ -8,8 +8,8 @@ const source = await readFile(resolve(here, '..', 'plugin.js'), 'utf8')
 
 // Regression guard for "Decision HUD disappears when I switch chats": the
 // pane must be registered on the panes area (docked beside the workspace,
-// survives session/route switches), not directly on ROUTES_AREA as the
-// live/only DecisionHudPane instance.
+// survives session/route switches) in addition to whatever route exists for
+// the sidebar nav row, not solely as a route.
 assert.match(
   source,
   /ctx\.register\(\{\s*id:\s*PANE_ID,\s*area:\s*'panes'/,
@@ -22,25 +22,28 @@ assert.match(
   'the docked pane must anchor beside the workspace so it persists across chat/session switches',
 )
 
-// The route registration must exist only to satisfy SidebarNavContribution's
-// path requirement and must NOT itself render DecisionHudPane a second time
-// (that would mean two live polling instances).
+// Regression guard for the follow-up bug: a route that renders null (to
+// "just reveal the docked pane") does not work with this app's router —
+// navigating to a ROUTES_AREA page fronts the WORKSPACE pane's own content,
+// which is whatever chat sits behind it when the route renders nothing.
+// Confirmed live: clicking the old stub route showed a chat, not the HUD.
+// The route must render the real panel, not a no-op/effect-only stub.
 assert.doesNotMatch(
   source,
-  /area:\s*ROUTES_AREA,\s*data:\s*\{\s*path:\s*'\/decision-hud'\s*\},\s*render:\s*\(\)\s*=>\s*jsx\(DecisionHudPane/,
-  'the /decision-hud route must not render DecisionHudPane directly — that would create a second live instance alongside the docked pane',
+  /function DecisionHudRevealRoute/,
+  'the /decision-hud route must not be a render-null reveal-effect stub — it does not front the docked pane in this router and instead exposes whatever chat sits behind the workspace pane',
 )
 
 assert.match(
   source,
-  /function DecisionHudRevealRoute\(\)/,
-  'the /decision-hud route must be a reveal-only stub that calls host.revealPane, not a second DecisionHudPane mount',
+  /area:\s*ROUTES_AREA,\s*data:\s*\{\s*path:\s*'\/decision-hud'\s*\},\s*render:\s*\(\)\s*=>\s*jsx\(DecisionHudPane/,
+  'the /decision-hud route must render DecisionHudPane directly so the sidebar nav row actually shows the HUD instead of falling through to chat',
 )
 
 assert.match(
   source,
   /host\.revealPane\(PANE_ID\)/,
-  'something (route effect and/or palette command) must call host.revealPane(PANE_ID) to re-surface the pane',
+  'the palette command must still call host.revealPane(PANE_ID) to re-surface the docked pane specifically',
 )
 
-console.log('pinned-pane (docked, not route-replaced) regression test passed')
+console.log('pinned-pane (docked pane + working route fallback) regression test passed')

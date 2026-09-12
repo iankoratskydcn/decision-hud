@@ -3233,30 +3233,16 @@ function DecisionHudPane() {
 
 const PANE_ID = `${PLUGIN_ID}:pane`
 
-// SidebarNavContribution's shape requires a real `path` (the sidebar filters
-// out anything whose path doesn't start with '/' — no onClick escape hatch),
-// so the nav row still needs a route to point at. This route does no
-// rendering of its own: it reveals the docked pane (see PANE_ID below) as a
-// side effect and renders nothing, so there is still only ONE live
-// DecisionHudPane instance mounted (the pane, not this route) — no duplicate
-// polling component, and clicking the sidebar row just fronts the pane
-// instead of replacing the main content with a second copy.
-function DecisionHudRevealRoute() {
-  React.useEffect(() => {
-    host.revealPane(PANE_ID)
-  }, [])
-  return null
-}
-
 export default {
   id: PLUGIN_ID,
   name: 'Decision HUD',
   register(ctx) {
-    // Docked pane, NOT a route-as-main-content: a page registered directly on
-    // ROUTES_AREA occupies the main content slot, so navigating to any chat
-    // session (also a route change) evicts it — the recurring "why did my
-    // Decision HUD disappear" complaint. A `panes` contribution instead docks
-    // a sibling tab beside the workspace (same mechanism the Kanban Bots pane
+    // Docked pane: registering ONLY on `panes` (never on ROUTES_AREA as the
+    // sole surface) is what makes it survive chat/session switching. A page
+    // mounted directly on ROUTES_AREA occupies the main content slot, so
+    // navigating to any chat session (also a route change) evicts it — the
+    // original "why did my Decision HUD disappear" bug. `panes` docks a
+    // sibling tab beside the workspace (same mechanism the Kanban Bots pane
     // and the terminal pane use) — it stays mounted, and its poll loop keeps
     // running, no matter which chat session is active or focused.
     ctx.register({
@@ -3270,13 +3256,23 @@ export default {
       },
       render: () => jsx(DecisionHudPane, {}),
     })
-    // Reveal-only route: satisfies SidebarNavContribution's path requirement
-    // without duplicating the live pane (see DecisionHudRevealRoute above).
+    // Sidebar nav row: SidebarNavContribution requires a real `path` (no
+    // onClick escape hatch), and this app's router treats any ROUTES_AREA
+    // page as content for the MAIN workspace pane, not a way to front an
+    // unrelated docked pane — a route rendering null just reveals whatever
+    // chat sits behind it (confirmed live: "click Decision HUD, see a
+    // chat"), it does not target the docked pane. So this route renders the
+    // real panel too, matching the built-in Kanban page pattern. That means
+    // clicking this sidebar row can, for the moment the route is active,
+    // run a second DecisionHudPane instance alongside the always-on docked
+    // pane (each with its own POLL_MS poll loop) — an acceptable, self-
+    // resolving cost (it unmounts the instant you navigate away) against
+    // the alternative of a route that doesn't reveal anything.
     ctx.register({
-      id: 'reveal-route',
+      id: 'page',
       area: ROUTES_AREA,
       data: { path: '/decision-hud' },
-      render: () => jsx(DecisionHudRevealRoute, {}),
+      render: () => jsx(DecisionHudPane, {}),
     })
     ctx.register({
       id: 'nav',
@@ -3284,8 +3280,8 @@ export default {
       order: 55,
       data: { path: '/decision-hud', label: 'Decision HUD', codicon: 'checklist' },
     })
-    // Palette command as a second door to the same reveal action, and the
-    // one an owner reaches for after minimizing/closing the pane's tab.
+    // Palette command to re-surface the docked pane specifically (e.g. after
+    // closing/minimizing its tab) without going through the route at all.
     ctx.register({
       id: 'open',
       area: PALETTE_AREA,
