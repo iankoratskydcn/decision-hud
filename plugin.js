@@ -24,7 +24,7 @@
  * older or hand-pushed decisions with no card_type set.
  */
 
-import { cn, haptic, host, ROUTES_AREA, SIDEBAR_NAV_AREA, useValue } from '@hermes/plugin-sdk'
+import { cn, haptic, host, PALETTE_AREA, ROUTES_AREA, SIDEBAR_NAV_AREA, useValue } from '@hermes/plugin-sdk'
 import { jsx, jsxs } from 'react/jsx-runtime'
 import * as React from 'react'
 
@@ -3231,25 +3231,70 @@ function DecisionHudPane() {
   })
 }
 
+const PANE_ID = `${PLUGIN_ID}:pane`
+
+// SidebarNavContribution's shape requires a real `path` (the sidebar filters
+// out anything whose path doesn't start with '/' — no onClick escape hatch),
+// so the nav row still needs a route to point at. This route does no
+// rendering of its own: it reveals the docked pane (see PANE_ID below) as a
+// side effect and renders nothing, so there is still only ONE live
+// DecisionHudPane instance mounted (the pane, not this route) — no duplicate
+// polling component, and clicking the sidebar row just fronts the pane
+// instead of replacing the main content with a second copy.
+function DecisionHudRevealRoute() {
+  React.useEffect(() => {
+    host.revealPane(PANE_ID)
+  }, [])
+  return null
+}
+
 export default {
   id: PLUGIN_ID,
   name: 'Decision HUD',
   register(ctx) {
-    // Sidebar tab + full page, same pattern as the built-in Kanban board —
-    // click "Decision HUD" in the sidebar like "Kanban", get a full-width page.
-    // Only ONE surface is registered (the page) to avoid two live copies of
-    // the same polling component rendering into the layout at once.
+    // Docked pane, NOT a route-as-main-content: a page registered directly on
+    // ROUTES_AREA occupies the main content slot, so navigating to any chat
+    // session (also a route change) evicts it — the recurring "why did my
+    // Decision HUD disappear" complaint. A `panes` contribution instead docks
+    // a sibling tab beside the workspace (same mechanism the Kanban Bots pane
+    // and the terminal pane use) — it stays mounted, and its poll loop keeps
+    // running, no matter which chat session is active or focused.
     ctx.register({
-      id: 'page',
+      id: PANE_ID,
+      area: 'panes',
+      title: 'Decision HUD',
+      data: {
+        placement: 'right',
+        dock: { pane: 'workspace', pos: 'right' },
+        minWidth: '26rem',
+      },
+      render: () => jsx(DecisionHudPane, {}),
+    })
+    // Reveal-only route: satisfies SidebarNavContribution's path requirement
+    // without duplicating the live pane (see DecisionHudRevealRoute above).
+    ctx.register({
+      id: 'reveal-route',
       area: ROUTES_AREA,
       data: { path: '/decision-hud' },
-      render: () => jsx(DecisionHudPane, {}),
+      render: () => jsx(DecisionHudRevealRoute, {}),
     })
     ctx.register({
       id: 'nav',
       area: SIDEBAR_NAV_AREA,
       order: 55,
       data: { path: '/decision-hud', label: 'Decision HUD', codicon: 'checklist' },
+    })
+    // Palette command as a second door to the same reveal action, and the
+    // one an owner reaches for after minimizing/closing the pane's tab.
+    ctx.register({
+      id: 'open',
+      area: PALETTE_AREA,
+      data: {
+        id: 'decision-hud.open',
+        label: 'Decision HUD: Show pane',
+        keywords: ['decision', 'hud', 'queue', 'pin', 'pane'],
+        run: () => host.revealPane(PANE_ID),
+      },
     })
   },
 }
