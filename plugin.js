@@ -2791,6 +2791,28 @@ function GridLayoutControls({ layout, onChange }) {
 }
 
 
+// SettingsPopover: small anchored dropdown/panel opened from the gear icon
+// in the DecisionHudPane header. Deliberately generic ("settings panel with
+// sections") so future settings can be added as additional labeled section
+// divs — for this pass grid size is the only section.
+function SettingsPopover({ layout, onChange }) {
+  return jsx('div', {
+    className:
+      'absolute right-0 top-full z-10 mt-1 w-max rounded-md border border-(--ui-stroke-secondary) bg-(--ui-surface-primary) p-2 shadow-lg',
+    children: jsxs('div', {
+      className: 'flex flex-col gap-1',
+      children: [
+        jsx('div', {
+          className: 'text-[0.65rem] uppercase tracking-wide text-(--ui-text-tertiary)',
+          children: 'Grid size',
+        }),
+        jsx(GridLayoutControls, { layout, onChange }),
+      ],
+    }),
+  })
+}
+
+
 // --- Left-hand metrics/dials sidebar -------------------------------------
 //
 // Real numbers only, computed from data this pane already polls (decisions,
@@ -2930,6 +2952,7 @@ function DecisionHudPane() {
   const [selectedBoard, setSelectedBoard] = React.useState(null)
   const [resolving, setResolving] = React.useState(false)
   const [gridLayout, setGridLayout] = React.useState(loadGridLayout)
+  const [settingsOpen, setSettingsOpen] = React.useState(false)
   const { boards, error: boardsError } = useKanbanBoards()
 
   // The real Kanban<->Decision-HUD cross-link (previously TODO/UI-state-only):
@@ -3005,24 +3028,32 @@ function DecisionHudPane() {
         className: 'flex min-w-0 flex-1 flex-col gap-3',
         children: [
           jsxs('div', {
-            className: 'flex items-center justify-between',
+            className: 'relative flex items-center justify-between',
             children: [
               jsx('div', { className: 'font-medium', children: 'Decision HUD' }),
-              jsx('div', {
-                className: 'text-[0.7rem] text-(--ui-text-tertiary)',
-                children: loading ? 'refreshing…' : `${decisions.length} pending`,
+              jsxs('div', {
+                className: 'flex items-center gap-2',
+                children: [
+                  jsx('div', {
+                    className: 'text-[0.7rem] text-(--ui-text-tertiary)',
+                    children: loading ? 'refreshing…' : `${decisions.length} pending`,
+                  }),
+                  jsx('button', {
+                    type: 'button',
+                    'aria-label': 'Settings',
+                    onClick: () => setSettingsOpen((v) => !v),
+                    className:
+                      'flex h-6 w-6 items-center justify-center rounded border border-(--ui-stroke-secondary) text-[0.8rem] text-(--ui-text-secondary) hover:bg-(--ui-surface-secondary)',
+                    children: '⚙',
+                  }),
+                ],
               }),
+              settingsOpen && jsx(SettingsPopover, { layout: gridLayout, onChange: handleGridChange }),
             ],
           }),
           jsx(BoardSelector, { boards, active: selectedBoard, onSelect: setSelectedBoard }),
           jsx(BoardSettingsPanel, { boardSlug: selectedBoard }),
-          jsxs('div', {
-            className: 'flex items-center justify-between gap-3',
-            children: [
-              jsx(ProjectSwitcher, { projects, active: effectiveProjectId, onSelect: (pid) => { setSelectedBoard(null); setActiveProject(pid) } }),
-              jsx(GridLayoutControls, { layout: gridLayout, onChange: handleGridChange }),
-            ],
-          }),
+          jsx(ProjectSwitcher, { projects, active: effectiveProjectId, onSelect: (pid) => { setSelectedBoard(null); setActiveProject(pid) } }),
           boardsError
             ? jsx('div', { className: 'text-[0.75rem] text-(--ui-danger,#e5484d)', children: boardsError })
             : null,
