@@ -2657,73 +2657,93 @@ function BoardSettingsPanel({ boardSlug }) {
 }
 
 function BoardSelector({ boards, active, onSelect }) {
-  // TODO: wire to decision filtering once board↔project mapping is decided.
-  // Kanban boards (`hermes kanban boards list --json`) and decision-hud
-  // "projects" (`hermes decision projects`) are two independent taxonomies
-  // today — most boards carry `project_id: null` (only the 'default' board
-  // has one set), so there is no reliable board -> project join to filter
-  // the decision queue by yet. Until that mapping exists, this selector is
-  // UI state only (`selectedBoard` in DecisionHudPane) and does not affect
-  // which decisions/projects are fetched or displayed below it.
+  // Board selection DOES drive the decision filter (see DecisionHudPane's
+  // selectedBoardProjectId) via the real board<->project_id cross-link
+  // wired in 2026-09-12 — this comment previously said the opposite ("UI
+  // state only, does not affect which decisions are fetched"), which was
+  // true when first written but went stale once the cross-link landed and
+  // was never corrected. Kept as a warning: a selector doing something the
+  // adjacent code disagrees about is exactly the kind of thing that reads
+  // as a UI bug (owner report: "these look like two unlabeled duplicate
+  // 'all' selectors stacked together") even though each one is individually
+  // correct — the label below is what actually fixes the confusion.
   return jsxs('div', {
-    className: 'flex flex-wrap gap-1 border-b border-(--ui-stroke-secondary) pb-2',
+    className: 'flex flex-col gap-1 border-b border-(--ui-stroke-secondary) pb-2',
     children: [
-      jsx('button', {
-        type: 'button',
-        onClick: () => onSelect(null),
-        className: cn(
-          'rounded px-2 py-0.5 text-[0.7rem]',
-          active === null ? 'bg-(--chrome-action-hover)' : 'text-(--ui-text-tertiary)'
-        ),
-        children: 'All',
+      jsx('div', {
+        className: 'text-[0.6rem] uppercase tracking-wide text-(--ui-text-tertiary)',
+        children: 'Boards',
       }),
-      ...boards.map((b) =>
-        jsx(
-          'button',
-          {
-            key: b.slug,
+      jsxs('div', {
+        className: 'flex flex-wrap gap-1',
+        children: [
+          jsx('button', {
             type: 'button',
-            onClick: () => onSelect(b.slug),
+            onClick: () => onSelect(null),
             className: cn(
               'rounded px-2 py-0.5 text-[0.7rem]',
-              active === b.slug ? 'bg-(--chrome-action-hover)' : 'text-(--ui-text-tertiary)'
+              active === null ? 'bg-(--chrome-action-hover)' : 'text-(--ui-text-tertiary)'
             ),
-            children: b.name || b.slug,
-          }
-        )
-      ),
+            children: 'All',
+          }),
+          ...boards.map((b) =>
+            jsx(
+              'button',
+              {
+                key: b.slug,
+                type: 'button',
+                onClick: () => onSelect(b.slug),
+                className: cn(
+                  'rounded px-2 py-0.5 text-[0.7rem]',
+                  active === b.slug ? 'bg-(--chrome-action-hover)' : 'text-(--ui-text-tertiary)'
+                ),
+                children: b.name || b.slug,
+              }
+            )
+          ),
+        ],
+      }),
     ],
   })
 }
 
 function ProjectSwitcher({ projects, active, onSelect }) {
   return jsxs('div', {
-    className: 'flex flex-wrap gap-1 border-b border-(--ui-stroke-secondary) pb-2',
+    className: 'flex flex-col gap-1 border-b border-(--ui-stroke-secondary) pb-2',
     children: [
-      jsx('button', {
-        type: 'button',
-        onClick: () => onSelect(null),
-        className: cn(
-          'rounded px-2 py-0.5 text-[0.7rem]',
-          active === null ? 'bg-(--chrome-action-hover)' : 'text-(--ui-text-tertiary)'
-        ),
-        children: 'all',
+      jsx('div', {
+        className: 'text-[0.6rem] uppercase tracking-wide text-(--ui-text-tertiary)',
+        children: 'Projects',
       }),
-      ...projects.map((p) =>
-        jsx(
-          'button',
-          {
-            key: p.project_id,
+      jsxs('div', {
+        className: 'flex flex-wrap gap-1',
+        children: [
+          jsx('button', {
             type: 'button',
-            onClick: () => onSelect(p.project_id),
+            onClick: () => onSelect(null),
             className: cn(
               'rounded px-2 py-0.5 text-[0.7rem]',
-              active === p.project_id ? 'bg-(--chrome-action-hover)' : 'text-(--ui-text-tertiary)'
+              active === null ? 'bg-(--chrome-action-hover)' : 'text-(--ui-text-tertiary)'
             ),
-            children: `${p.slug || p.project_id} (${p.pending})`,
-          }
-        )
-      ),
+            children: 'all',
+          }),
+          ...projects.map((p) =>
+            jsx(
+              'button',
+              {
+                key: p.project_id,
+                type: 'button',
+                onClick: () => onSelect(p.project_id),
+                className: cn(
+                  'rounded px-2 py-0.5 text-[0.7rem]',
+                  active === p.project_id ? 'bg-(--chrome-action-hover)' : 'text-(--ui-text-tertiary)'
+                ),
+                children: `${p.slug || p.project_id} (${p.pending})`,
+              }
+            )
+          ),
+        ],
+      }),
     ],
   })
 }
