@@ -2872,6 +2872,142 @@ function useHudMetrics(decisions, boards) {
   }, [decisions, boards, necessity])
 }
 
+// useAgentHealth: sorted agent-health roster for the metrics sidebar.
+//
+// Real numbers only, same convention as useHudMetrics above: this pulls the
+// known-agent roster from `hermes kanban assignees --json` (confirmed shape:
+// a bare array of `{ name, on_disk, counts }`, where `counts` is commonly
+// `{}` in an environment with no active task data — never assume it has any
+// particular status keys) plus `hermes kanban stats --json` (confirmed
+// shape: `{ by_status, by_assignee, oldest_ready_age_seconds, now }`, also
+// commonly empty). Per-agent blocked/running task counts would ideally come
+// from `by_assignee`, but when that's empty (as observed) there is no real
+// per-agent signal available today — this renders those agents as
+// "no data" rather than inventing a fabricated score. This is a deliberately
+// simple MVP: sort by blocked-task count descending (most stuck first), then
+// running-task count descending, as tie-break. See
+// decision-hub-integration/research-composite-health-score-agent4.md for the
+// future EWMA composite design — not implemented here.
+function useAgentHealth() {
+  const [state, setState] = React.useState({ agents: [], loading: true, error: null })
+
+  const refresh = React.useCallback(async () => {
+    try {
+      const [assigneesRes, statsRes] = await Promise.all([
+        cliExec(['kanban', 'assignees', '--json']),
+        cliExec(['kanban', 'stats', '--json']),
+      ])
+      const roster = Array.isArray(assigneesRes) ? assigneesRes : []
+      const byAssignee = (statsRes && typeof statsRes === 'object' && statsRes.by_assignee) || {}
+
+      const agents = roster.map((a) => {
+        const name = (a && a.name) || 'unknown'
+        // Prefer real per-agent breakdowns from kanban stats' by_assignee
+        // when present; fall back to the roster's own `counts` field
+        // (also real CLI data, just from a different endpoint). Neither is
+        // guaranteed to carry any status keys in a quiet environment.
+        const fromStats = byAssignee[name] || null
+        const fromRoster = (a && a.counts) || {}
+        const counts = fromStats && typeof fromStats === 'object' ? fromStats : fromRoster
+        const blocked = typeof counts.blocked === 'number' ? counts.blocked : 0
+        const running = typeof counts.running === 'number' ? counts.running : 0
+        const hasData = Object.keys(counts).length > 0
+        return {
+          name,
+          onDisk: Boolean(a && a.on_disk),
+          blocked,
+          running,
+          hasData,
+        }
+      })
+
+      // Unhealthiest first: most blocked work first, running count as
+      // tie-break. Agents with no real signal float to the bottom, shown as
+      // neutral "no data" rather than sorted as if they were healthy.
+      agents.sort((x, y) => {
+        if (x.hasData !== y.hasData) return x.hasData ? -1 : 1
+        if (y.blocked !== x.blocked) return y.blocked - x.blocked
+        return y.running - x.running
+      })
+
+      setState({ agents, loading: false, error: null })
+    } catch (e) {
+      setState((s) => ({ ...s, loading: false, error: String(e.message || e) }))
+    }
+  }, [])
+
+  React.useEffect(() => {
+    refresh()
+    const id = setInterval(refresh, POLL_MS)
+    return () => clearInterval(id)
+  }, [refresh])
+
+  return { ...state, refresh }
+}
+
+// AgentHealthList: compact rows below the dials, one per known agent,
+// sorted unhealthiest-first (see useAgentHealth). Honest empty/neutral
+// states instead of a fabricated ranking, matching the "n/a" / "no pending
+// rows" convention used elsewhere in this sidebar.
+function AgentHealthList({ health }) {
+  const { agents, loading, error } = health
+
+  if (error) {
+    return jsx('div', {
+      className: 'text-[0.65rem] text-(--ui-danger,#e5484d)',
+      children: 'agent health: error',
+    })
+  }
+  if (loading) {
+    return jsx('div', {
+      className: 'text-center text-[0.65rem] text-(--ui-text-tertiary)',
+      children: 'agent health: loading…',
+    })
+  }
+  if (agents.length === 0) {
+    return jsx('div', {
+      className: 'text-center text-[0.65rem] text-(--ui-text-tertiary)',
+      children: 'agent health: no agents',
+    })
+  }
+
+  const anyData = agents.some((a) => a.hasData)
+
+  return jsxs('div', {
+    className: 'flex flex-col gap-1',
+    children: [
+      jsx('div', {
+        className: 'text-[0.65rem] uppercase tracking-wide text-(--ui-text-tertiary)',
+        children: 'Agent health',
+      }),
+      !anyData
+        ? jsx('div', {
+            className: 'text-center text-[0.6rem] text-(--ui-text-tertiary)',
+            children: 'n/a (no per-agent task data yet)',
+          })
+        : jsx('div', {
+            className: 'flex flex-col gap-0.5',
+            children: agents.map((a) =>
+              jsxs('div', {
+                key: a.name,
+                className: 'flex items-center justify-between gap-1 text-[0.65rem]',
+                children: [
+                  jsx('span', {
+                    className: 'truncate text-(--ui-text-secondary)',
+                    children: a.name,
+                  }),
+                  jsx('span', {
+                    className: a.hasData ? 'text-(--ui-text-tertiary)' : 'text-(--ui-text-tertiary) opacity-50',
+                    children: a.hasData ? `${a.blocked}b / ${a.running}r` : 'no data',
+                  }),
+                ],
+              })
+            ),
+          }),
+    ],
+  })
+}
+
 function MetricDial({ label, value, min, max, unit, subtitle }) {
   return jsxs('div', {
     className: 'flex flex-col items-center gap-1 rounded-lg border border-(--ui-stroke-secondary) p-2',
@@ -2942,6 +3078,7 @@ function MetricsSidebar({ metrics }) {
               unit: '%',
               subtitle: `n=${necessity.marked}`,
             }),
+      jsx(AgentHealthList, { health: agentHealth }),
     ],
   })
 }
@@ -2973,6 +3110,7 @@ function DecisionHudPane() {
 
   const { decisions, projects, loading, error, refresh } = useDecisionQueue(effectiveProjectId)
   const metrics = useHudMetrics(decisions, boards)
+  const agentHealth = useAgentHealth()
 
   const handleGridChange = React.useCallback((next) => {
     setGridLayout(next)
@@ -3023,7 +3161,7 @@ function DecisionHudPane() {
   return jsxs('div', {
     className: 'flex h-full gap-3 p-3 text-sm',
     children: [
-      jsx(MetricsSidebar, { metrics }),
+      jsx(MetricsSidebar, { metrics, agentHealth }),
       jsxs('div', {
         className: 'flex min-w-0 flex-1 flex-col gap-3',
         children: [
