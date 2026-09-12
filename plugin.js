@@ -3027,7 +3027,7 @@ function MetricDial({ label, value, min, max, unit, subtitle }) {
 // MetricsSidebar: left-hand panel for dials/metrics, matching the plugin
 // header comment's original "switchable visualization" placeholder — this
 // is the real implementation of that slot, not a further placeholder.
-function MetricsSidebar({ metrics }) {
+function MetricsSidebar({ metrics, agentHealth }) {
   const { pendingCount, highUrgencyCount, cardCoverage, boardsTotal, boardsGated, necessity } = metrics
   return jsxs('div', {
     className: 'flex w-[160px] shrink-0 flex-col gap-3 overflow-y-auto border-r border-(--ui-stroke-secondary) pr-3',
