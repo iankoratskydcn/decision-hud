@@ -34,16 +34,38 @@ assert.doesNotMatch(
   'the /decision-hud route must not be a render-null reveal-effect stub — it does not front the docked pane in this router and instead exposes whatever chat sits behind the workspace pane',
 )
 
-assert.match(
+// Regression guard for the third bug in this saga: rendering the REAL
+// DecisionHudPane on the route (a subsequent attempt, replacing the
+// earlier reveal-effect stub) fixed "shows a chat instead of the HUD" but
+// introduced a NEW bug — it created a second, fully independent live
+// instance (own state, own poll loop) alongside the always-on docked pane,
+// and a live screenshot caught both instances rendering visibly divergent
+// UI (different settings-popover open/closed state) on screen at once. The
+// route must render neither a null-effect stub nor a second real
+// DecisionHudPane — only a static, non-stateful placeholder that reveals
+// the ONE docked instance.
+assert.doesNotMatch(
   source,
   /area:\s*ROUTES_AREA,\s*data:\s*\{\s*path:\s*'\/decision-hud'\s*\},\s*render:\s*\(\)\s*=>\s*jsx\(DecisionHudPane/,
-  'the /decision-hud route must render DecisionHudPane directly so the sidebar nav row actually shows the HUD instead of falling through to chat',
+  'the /decision-hud route must NOT render a second live DecisionHudPane — it duplicates state/poll loops and produces visibly divergent UI in the two instances (confirmed live via screenshot)',
+)
+
+assert.match(
+  source,
+  /function DecisionHudRoutePlaceholder\(\)/,
+  'the /decision-hud route must render a static, non-polling placeholder component distinct from DecisionHudPane',
+)
+
+assert.match(
+  source,
+  /area:\s*ROUTES_AREA,\s*data:\s*\{\s*path:\s*'\/decision-hud'\s*\},\s*render:\s*\(\)\s*=>\s*jsx\(DecisionHudRoutePlaceholder/,
+  'the /decision-hud route must render DecisionHudRoutePlaceholder, not DecisionHudPane and not a null-returning stub',
 )
 
 assert.match(
   source,
   /host\.revealPane\(PANE_ID\)/,
-  'the palette command must still call host.revealPane(PANE_ID) to re-surface the docked pane specifically',
+  'something (the route placeholder button and/or the palette command) must call host.revealPane(PANE_ID) to re-surface the ONE docked pane instead of duplicating it',
 )
 
 console.log('pinned-pane (docked pane + working route fallback) regression test passed')

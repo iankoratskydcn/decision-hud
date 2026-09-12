@@ -3430,6 +3430,47 @@ function DecisionHudPane() {
 
 const PANE_ID = `${PLUGIN_ID}:pane`
 
+// DecisionHudRoutePlaceholder: the /decision-hud route's content. NOT a
+// second live DecisionHudPane — screenshot bug confirmed the previous
+// "run a second full instance, it's cheap and self-resolving" approach was
+// wrong: the docked pane (always mounted, right side) and the routed page
+// (main content, when navigated to) rendered as two INDEPENDENT React
+// trees with their own state (settingsOpen, gridLayout, etc.) and their own
+// POLL_MS poll loop — one screenshot showed the gear-icon settings popover
+// open in one instance and a completely different inline grid control
+// layout in the other, on screen at the same time, because they really are
+// two unrelated component instances, not one UI reacting twice.
+//
+// This is a static, non-polling placeholder instead: it renders no data,
+// holds no settings state, and its one interactive element reveals the
+// REAL docked pane (host.revealPane(PANE_ID)) rather than duplicating it.
+// The sidebar nav row still needs a route to point at (SidebarNavContribution
+// requires a path, no onClick escape hatch — see the plugin's register()),
+// so this is what makes clicking that row land somewhere coherent without
+// resurrecting either of the two prior bugs (a reveal-effect stub showed a
+// stray chat; a second live pane showed divergent duplicate state).
+function DecisionHudRoutePlaceholder() {
+  return jsx('div', {
+    className: 'flex h-full flex-col items-center justify-center gap-3 p-6 text-center text-sm text-(--ui-text-secondary)',
+    children: [
+      jsx('div', { key: 'title', className: 'font-medium', children: 'Decision HUD lives in the docked pane' }),
+      jsx('div', {
+        key: 'body',
+        className: 'max-w-sm text-[0.8rem] text-(--ui-text-tertiary)',
+        children: 'It stays pinned beside your chats so it never gets replaced by switching sessions. Use the button below to bring it forward.',
+      }),
+      jsx('button', {
+        key: 'reveal',
+        type: 'button',
+        onClick: () => host.revealPane(PANE_ID),
+        className:
+          'rounded-md border border-(--ui-stroke-secondary) px-3 py-1.5 text-[0.8rem] font-medium hover:bg-(--chrome-action-hover)',
+        children: 'Show Decision HUD',
+      }),
+    ],
+  })
+}
+
 export default {
   id: PLUGIN_ID,
   name: 'Decision HUD',
@@ -3458,18 +3499,19 @@ export default {
     // page as content for the MAIN workspace pane, not a way to front an
     // unrelated docked pane — a route rendering null just reveals whatever
     // chat sits behind it (confirmed live: "click Decision HUD, see a
-    // chat"), it does not target the docked pane. So this route renders the
-    // real panel too, matching the built-in Kanban page pattern. That means
-    // clicking this sidebar row can, for the moment the route is active,
-    // run a second DecisionHudPane instance alongside the always-on docked
-    // pane (each with its own POLL_MS poll loop) — an acceptable, self-
-    // resolving cost (it unmounts the instant you navigate away) against
-    // the alternative of a route that doesn't reveal anything.
+    // chat"). Rendering the REAL DecisionHudPane here (an earlier attempt)
+    // was also wrong: it created a second, independent live instance with
+    // its own poll loop and its own React state, and a later screenshot
+    // caught the two instances showing visibly divergent UI (different
+    // settings-popover state) on screen simultaneously. This route renders
+    // a static, non-polling placeholder instead — see
+    // DecisionHudRoutePlaceholder above — whose one action reveals the
+    // SAME docked pane rather than duplicating it.
     ctx.register({
       id: 'page',
       area: ROUTES_AREA,
       data: { path: '/decision-hud' },
-      render: () => jsx(DecisionHudPane, {}),
+      render: () => jsx(DecisionHudRoutePlaceholder, {}),
     })
     ctx.register({
       id: 'nav',
