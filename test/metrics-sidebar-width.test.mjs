@@ -6,17 +6,30 @@ import { fileURLToPath } from 'node:url'
 const here = dirname(fileURLToPath(import.meta.url))
 const source = await readFile(resolve(here, '..', 'plugin.js'), 'utf8')
 
-// MetricsSidebar (left-hand metrics/dials panel) should size to ~1/4 of the
-// pane's horizontal space, capped at 200px so it never dominates a wide
-// docked pane.
-const sidebarClassMatch = source.match(
-  /function MetricsSidebar\([^)]*\)\s*\{[\s\S]*?className:\s*'([^']*)'/,
+// MetricsSidebar (metrics/dials panel) width is now a user-configurable
+// setting (loadSidebarSettings().widthPx, default 200, adjustable in the
+// gear settings popover), replacing the earlier hardcoded w-1/4/max-w-[200px]
+// className approach — see sidebar-settings.test.mjs for the settings
+// contract itself. This test now pins the width being applied inline via
+// style rather than via a fixed utility class.
+const sidebarFnBody = source.match(/function MetricsSidebar\([^)]*\)\s*\{[\s\S]*?\n\}\n/)
+assert.ok(sidebarFnBody, 'MetricsSidebar function body must exist')
+
+assert.match(
+  sidebarFnBody[0],
+  /style:\s*\{\s*width:\s*`\$\{widthPx\}px`/,
+  'MetricsSidebar must apply widthPx via inline style, not a fixed w-1/4 class',
 )
-assert.ok(sidebarClassMatch, 'MetricsSidebar must have a className on its root div')
+assert.doesNotMatch(
+  sidebarFnBody[0],
+  /\bw-1\/4\b/,
+  'the old fixed w-1/4 class must be gone now that width is a setting',
+)
+assert.doesNotMatch(
+  sidebarFnBody[0],
+  /\bw-\[160px\]\b/,
+  'the old fixed 160px width must be gone',
+)
 
-const cls = sidebarClassMatch[1]
-assert.match(cls, /\bw-1\/4\b/, 'MetricsSidebar root must use w-1/4 (~one quarter of horizontal space)')
-assert.match(cls, /max-w-\[200px\]/, 'MetricsSidebar root must cap width at max-w-[200px]')
-assert.doesNotMatch(cls, /\bw-\[160px\]\b/, 'the old fixed 160px width must be gone')
+console.log('metrics-sidebar-width (now a configurable setting, not a fixed class) regression test passed')
 
-console.log('metrics-sidebar-width (1/4 width, 200px cap) regression test passed')

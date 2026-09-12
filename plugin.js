@@ -2732,6 +2732,44 @@ const GRID_LAYOUT_STORAGE_KEY = 'decision-hud:grid-layout'
 const GRID_MIN = 1
 const GRID_MAX = 3
 
+const SIDEBAR_SETTINGS_STORAGE_KEY = 'decision-hud:sidebar-settings'
+const SIDEBAR_WIDTH_MIN = 140
+const SIDEBAR_WIDTH_MAX = 320
+const SIDEBAR_WIDTH_DEFAULT = 200
+const DIAL_COLS_MIN = 1
+const DIAL_COLS_MAX = 2
+
+// loadSidebarSettings/saveSidebarSettings: side (left/right), widthPx (the
+// sidebar's max-width cap in px, replacing the old hardcoded 200), and
+// dialCols (metric-dial grid column count) all live in one small settings
+// object, same persistence pattern as loadGridLayout/saveGridLayout above.
+function loadSidebarSettings() {
+  try {
+    const raw = localStorage.getItem(SIDEBAR_SETTINGS_STORAGE_KEY)
+    if (!raw) return { side: 'left', widthPx: SIDEBAR_WIDTH_DEFAULT, dialCols: 1 }
+    const parsed = JSON.parse(raw)
+    const side = parsed.side === 'right' ? 'right' : 'left'
+    const widthPx = Number.isFinite(parsed.widthPx)
+      ? Math.min(SIDEBAR_WIDTH_MAX, Math.max(SIDEBAR_WIDTH_MIN, parsed.widthPx))
+      : SIDEBAR_WIDTH_DEFAULT
+    const dialCols = Number.isInteger(parsed.dialCols)
+      ? Math.min(DIAL_COLS_MAX, Math.max(DIAL_COLS_MIN, parsed.dialCols))
+      : 1
+    return { side, widthPx, dialCols }
+  } catch {
+    return { side: 'left', widthPx: SIDEBAR_WIDTH_DEFAULT, dialCols: 1 }
+  }
+}
+
+function saveSidebarSettings(settings) {
+  try {
+    localStorage.setItem(SIDEBAR_SETTINGS_STORAGE_KEY, JSON.stringify(settings))
+  } catch {
+    // best-effort — a failed localStorage write just means these settings
+    // reset to default next session, never a crash (same as saveGridLayout).
+  }
+}
+
 function loadGridLayout() {
   try {
     const raw = localStorage.getItem(GRID_LAYOUT_STORAGE_KEY)
@@ -2791,22 +2829,101 @@ function GridLayoutControls({ layout, onChange }) {
 }
 
 
+// SidebarPositionControls: left/right toggle + width stepper for the
+// metrics sidebar, persisted via loadSidebarSettings/saveSidebarSettings.
+function SidebarPositionControls({ settings, onChange }) {
+  return jsxs('div', {
+    className: 'flex items-center gap-3 text-(--ui-text-secondary)',
+    children: [
+      jsx('span', { className: 'text-[0.65rem] uppercase tracking-wide text-(--ui-text-tertiary)', children: 'Sidebar' }),
+      jsxs('div', {
+        className: 'flex items-center gap-1',
+        children: [
+          jsx('button', {
+            type: 'button',
+            'aria-label': 'Sidebar left',
+            onClick: () => onChange({ ...settings, side: 'left' }),
+            className: `h-5 rounded border px-1.5 text-[0.65rem] ${settings.side === 'left' ? 'border-(--ui-accent) text-(--ui-accent)' : 'border-(--ui-stroke-secondary)'}`,
+            children: 'Left',
+          }),
+          jsx('button', {
+            type: 'button',
+            'aria-label': 'Sidebar right',
+            onClick: () => onChange({ ...settings, side: 'right' }),
+            className: `h-5 rounded border px-1.5 text-[0.65rem] ${settings.side === 'right' ? 'border-(--ui-accent) text-(--ui-accent)' : 'border-(--ui-stroke-secondary)'}`,
+            children: 'Right',
+          }),
+        ],
+      }),
+      jsxs('div', {
+        className: 'flex items-center gap-1',
+        children: [
+          jsx('button', {
+            type: 'button',
+            disabled: settings.widthPx <= SIDEBAR_WIDTH_MIN,
+            onClick: () => onChange({ ...settings, widthPx: Math.max(SIDEBAR_WIDTH_MIN, settings.widthPx - 20) }),
+            className: 'h-5 w-5 rounded border border-(--ui-stroke-secondary) text-[0.7rem] disabled:opacity-30',
+            children: '−',
+          }),
+          jsx('span', { className: 'w-9 text-center text-[0.65rem] tabular-nums', children: `${settings.widthPx}px` }),
+          jsx('button', {
+            type: 'button',
+            disabled: settings.widthPx >= SIDEBAR_WIDTH_MAX,
+            onClick: () => onChange({ ...settings, widthPx: Math.min(SIDEBAR_WIDTH_MAX, settings.widthPx + 20) }),
+            className: 'h-5 w-5 rounded border border-(--ui-stroke-secondary) text-[0.7rem] disabled:opacity-30',
+            children: '+',
+          }),
+        ],
+      }),
+    ],
+  })
+}
+
+// DialGridControls: grid-select (1 or 2 columns) for the metric dials'
+// layout inside MetricsSidebar — distinct from GridLayoutControls, which
+// controls the decision-card grid in the main column, not the dials.
+function DialGridControls({ settings, onChange }) {
+  return jsxs('div', {
+    className: 'flex items-center gap-2 text-(--ui-text-secondary)',
+    children: [
+      jsx('span', { className: 'text-[0.65rem] uppercase tracking-wide text-(--ui-text-tertiary)', children: 'Dials' }),
+      jsx('div', {
+        className: 'flex items-center gap-1',
+        children: [DIAL_COLS_MIN, DIAL_COLS_MAX].map((n) =>
+          jsx('button', {
+            key: n,
+            type: 'button',
+            'aria-label': `${n} column${n > 1 ? 's' : ''}`,
+            onClick: () => onChange({ ...settings, dialCols: n }),
+            className: `h-5 rounded border px-1.5 text-[0.65rem] ${settings.dialCols === n ? 'border-(--ui-accent) text-(--ui-accent)' : 'border-(--ui-stroke-secondary)'}`,
+            children: `${n}col`,
+          })
+        ),
+      }),
+    ],
+  })
+}
+
+
 // SettingsPopover: small anchored dropdown/panel opened from the gear icon
 // in the DecisionHudPane header. Deliberately generic ("settings panel with
 // sections") so future settings can be added as additional labeled section
-// divs — for this pass grid size is the only section.
-function SettingsPopover({ layout, onChange }) {
+// divs — grid size, sidebar position/width, and dial grid are the sections
+// today.
+function SettingsPopover({ layout, onGridChange, sidebarSettings, onSidebarChange }) {
   return jsx('div', {
     className:
       'absolute right-0 top-full z-10 mt-1 w-max rounded-md border border-(--ui-stroke-secondary) bg-(--ui-surface-primary) p-2 shadow-lg',
     children: jsxs('div', {
-      className: 'flex flex-col gap-1',
+      className: 'flex flex-col gap-2',
       children: [
         jsx('div', {
           className: 'text-[0.65rem] uppercase tracking-wide text-(--ui-text-tertiary)',
           children: 'Grid size',
         }),
-        jsx(GridLayoutControls, { layout, onChange }),
+        jsx(GridLayoutControls, { layout, onChange: onGridChange }),
+        jsx(SidebarPositionControls, { settings: sidebarSettings, onChange: onSidebarChange }),
+        jsx(DialGridControls, { settings: sidebarSettings, onChange: onSidebarChange }),
       ],
     }),
   })
@@ -3024,65 +3141,74 @@ function MetricDial({ label, value, min, max, unit, subtitle }) {
   })
 }
 
-// MetricsSidebar: left-hand panel for dials/metrics, matching the plugin
-// header comment's original "switchable visualization" placeholder — this
-// is the real implementation of that slot, not a further placeholder.
-function MetricsSidebar({ metrics, agentHealth }) {
+// MetricsSidebar: dials/metrics panel, matching the plugin header comment's
+// original "switchable visualization" placeholder — this is the real
+// implementation of that slot, not a further placeholder. Side (left/right)
+// and width are now user-configurable settings instead of a hardcoded
+// left-only w-1/4/max-w-[200px] class.
+function MetricsSidebar({ metrics, agentHealth, side, widthPx, dialCols }) {
   const { pendingCount, highUrgencyCount, cardCoverage, boardsTotal, boardsGated, necessity } = metrics
+  const borderClass = side === 'right' ? 'border-l pl-3' : 'border-r pr-3'
   return jsxs('div', {
-    // ~1/4 of the pane's horizontal space, capped at 200px so it doesn't
-    // dominate on a wide docked pane — w-1/4 alone would keep growing with
-    // the pane; max-w-[200px] caps it while still shrinking below 1/4 on a
-    // narrow pane instead of overflowing.
-    className: 'flex w-1/4 max-w-[200px] shrink-0 flex-col gap-3 overflow-y-auto border-r border-(--ui-stroke-secondary) pr-3',
+    className: `flex shrink-0 flex-col gap-3 overflow-y-auto border-(--ui-stroke-secondary) ${borderClass}`,
+    style: { width: `${widthPx}px`, maxWidth: `${widthPx}px` },
     children: [
       jsx('div', {
         className: 'text-[0.65rem] uppercase tracking-wide text-(--ui-text-tertiary)',
         children: 'Metrics',
       }),
-      jsx(MetricDial, {
-        label: 'Pending',
-        value: pendingCount,
-        min: 0,
-        max: Math.max(5, pendingCount),
-        unit: '',
-        subtitle: `${highUrgencyCount} high-urgency`,
-      }),
-      jsx(MetricDial, {
-        label: 'Card coverage',
-        value: cardCoverage === null ? 0 : Math.round(cardCoverage * 100),
-        min: 0,
-        max: 100,
-        unit: '%',
-        subtitle: cardCoverage === null ? 'no pending rows' : 'rich cards vs plain MCQ',
-      }),
-      jsx(MetricDial, {
-        label: 'Boards gated',
-        value: boardsGated,
-        min: 0,
-        max: Math.max(1, boardsTotal),
-        unit: '',
-        subtitle: `${boardsGated} / ${boardsTotal} armed`,
-      }),
-      necessity.error
-        ? jsx('div', {
-            className: 'text-[0.65rem] text-(--ui-danger,#e5484d)',
-            children: 'necessity-rate: error',
-          })
-        : necessity.rate === null
-          ? jsx('div', {
-              className: 'text-center text-[0.65rem] text-(--ui-text-tertiary)',
-              children: `Escalation necessity: n/a (${necessity.marked} marked)`,
-            })
-          : jsx(MetricDial, {
-              label: 'Escalation necessity',
-              value: Math.round(necessity.rate * 100),
-              min: 0,
-              max: 100,
-              unit: '%',
-              subtitle: `n=${necessity.marked}`,
-            }),
+      // Agent health now renders ABOVE the metric dials (owner request:
+      // "swap the agent health and the metrics cards so metrics is on the
+      // bottom") — was previously the last child, after all dials.
       jsx(AgentHealthList, { health: agentHealth }),
+      jsxs('div', {
+        className: 'grid gap-2',
+        style: { gridTemplateColumns: `repeat(${dialCols}, minmax(0, 1fr))` },
+        children: [
+          jsx(MetricDial, {
+            label: 'Pending',
+            value: pendingCount,
+            min: 0,
+            max: Math.max(5, pendingCount),
+            unit: '',
+            subtitle: `${highUrgencyCount} high-urgency`,
+          }),
+          jsx(MetricDial, {
+            label: 'Card coverage',
+            value: cardCoverage === null ? 0 : Math.round(cardCoverage * 100),
+            min: 0,
+            max: 100,
+            unit: '%',
+            subtitle: cardCoverage === null ? 'no pending rows' : 'rich cards vs plain MCQ',
+          }),
+          jsx(MetricDial, {
+            label: 'Boards gated',
+            value: boardsGated,
+            min: 0,
+            max: Math.max(1, boardsTotal),
+            unit: '',
+            subtitle: `${boardsGated} / ${boardsTotal} armed`,
+          }),
+          necessity.error
+            ? jsx('div', {
+                className: 'text-[0.65rem] text-(--ui-danger,#e5484d)',
+                children: 'necessity-rate: error',
+              })
+            : necessity.rate === null
+              ? jsx('div', {
+                  className: 'text-center text-[0.65rem] text-(--ui-text-tertiary)',
+                  children: `Escalation necessity: n/a (${necessity.marked} marked)`,
+                })
+              : jsx(MetricDial, {
+                  label: 'Escalation necessity',
+                  value: Math.round(necessity.rate * 100),
+                  min: 0,
+                  max: 100,
+                  unit: '%',
+                  subtitle: `n=${necessity.marked}`,
+                }),
+        ],
+      }),
     ],
   })
 }
@@ -3093,6 +3219,7 @@ function DecisionHudPane() {
   const [selectedBoard, setSelectedBoard] = React.useState(null)
   const [resolving, setResolving] = React.useState(false)
   const [gridLayout, setGridLayout] = React.useState(loadGridLayout)
+  const [sidebarSettings, setSidebarSettings] = React.useState(loadSidebarSettings)
   const [settingsOpen, setSettingsOpen] = React.useState(false)
   const { boards, error: boardsError } = useKanbanBoards()
 
@@ -3119,6 +3246,11 @@ function DecisionHudPane() {
   const handleGridChange = React.useCallback((next) => {
     setGridLayout(next)
     saveGridLayout(next)
+  }, [])
+
+  const handleSidebarSettingsChange = React.useCallback((next) => {
+    setSidebarSettings(next)
+    saveSidebarSettings(next)
   }, [])
 
   const handleResolve = React.useCallback(
@@ -3162,76 +3294,87 @@ function DecisionHudPane() {
     [refresh]
   )
 
-  return jsxs('div', {
-    className: 'flex h-full gap-3 p-3 text-sm',
+  const metricsSidebar = jsx(MetricsSidebar, {
+    metrics, agentHealth,
+    side: sidebarSettings.side, widthPx: sidebarSettings.widthPx, dialCols: sidebarSettings.dialCols,
+  })
+  const mainColumn = jsxs('div', {
+    className: 'flex min-w-0 flex-1 flex-col gap-3',
     children: [
-      jsx(MetricsSidebar, { metrics, agentHealth }),
       jsxs('div', {
-        className: 'flex min-w-0 flex-1 flex-col gap-3',
+        className: 'relative flex items-center justify-between',
         children: [
+          jsx('div', { className: 'font-medium', children: 'Decision HUD' }),
           jsxs('div', {
-            className: 'relative flex items-center justify-between',
+            className: 'flex items-center gap-2',
             children: [
-              jsx('div', { className: 'font-medium', children: 'Decision HUD' }),
-              jsxs('div', {
-                className: 'flex items-center gap-2',
-                children: [
-                  jsx('div', {
-                    className: 'text-[0.7rem] text-(--ui-text-tertiary)',
-                    children: loading ? 'refreshing…' : `${decisions.length} pending`,
-                  }),
-                  jsx('button', {
-                    type: 'button',
-                    'aria-label': 'Settings',
-                    onClick: () => setSettingsOpen((v) => !v),
-                    className:
-                      'flex h-6 w-6 items-center justify-center rounded border border-(--ui-stroke-secondary) text-[0.8rem] text-(--ui-text-secondary) hover:bg-(--ui-surface-secondary)',
-                    children: '⚙',
-                  }),
-                ],
+              jsx('div', {
+                className: 'text-[0.7rem] text-(--ui-text-tertiary)',
+                children: loading ? 'refreshing…' : `${decisions.length} pending`,
               }),
-              settingsOpen && jsx(SettingsPopover, { layout: gridLayout, onChange: handleGridChange }),
+              jsx('button', {
+                type: 'button',
+                'aria-label': 'Settings',
+                onClick: () => setSettingsOpen((v) => !v),
+                className:
+                  'flex h-6 w-6 items-center justify-center rounded border border-(--ui-stroke-secondary) text-[0.8rem] text-(--ui-text-secondary) hover:bg-(--ui-surface-secondary)',
+                children: '⚙',
+              }),
             ],
           }),
-          jsx(BoardSelector, { boards, active: selectedBoard, onSelect: setSelectedBoard }),
-          jsx(BoardSettingsPanel, { boardSlug: selectedBoard }),
-          jsx(ProjectSwitcher, { projects, active: effectiveProjectId, onSelect: (pid) => { setSelectedBoard(null); setActiveProject(pid) } }),
-          boardsError
-            ? jsx('div', { className: 'text-[0.75rem] text-(--ui-danger,#e5484d)', children: boardsError })
-            : null,
-          error
-            ? jsx('div', { className: 'text-[0.75rem] text-(--ui-danger,#e5484d)', children: error })
-            : null,
-          jsx('div', {
-            className: 'flex flex-1 flex-col overflow-y-auto',
-            children:
-              decisions.length === 0
-                ? jsx('div', {
-                    className: 'flex h-full items-center justify-center text-(--ui-text-tertiary)',
-                    children: loading ? 'Loading…' : 'Queue clear.',
-                  })
-                : jsx('div', {
-                    // Static NxM grid, 1-3 cols x 1-3 rows (user-adjustable via
-                    // GridLayoutControls above, persisted to localStorage) —
-                    // "static" means a fixed cell count, not drag-resizable
-                    // panes. Shows up to cols*rows cards; anything beyond
-                    // that count stays in the queue and appears once a slot
-                    // frees up on the next poll/resolve.
-                    className: 'grid gap-3',
-                    style: {
-                      gridTemplateColumns: `repeat(${gridLayout.cols}, minmax(0, 1fr))`,
-                      gridTemplateRows: `repeat(${gridLayout.rows}, auto)`,
-                    },
-                    children: decisions
-                      .slice(0, gridLayout.cols * gridLayout.rows)
-                      .map((d) =>
-                        jsx(DecisionCard, { key: d.id, decision: d, onResolve: handleResolve, onDefer: handleDefer, resolving })
-                      ),
-                  }),
+          settingsOpen && jsx(SettingsPopover, {
+            layout: gridLayout, onGridChange: handleGridChange,
+            sidebarSettings, onSidebarChange: handleSidebarSettingsChange,
           }),
         ],
       }),
+      jsx(BoardSelector, { boards, active: selectedBoard, onSelect: setSelectedBoard }),
+      jsx(BoardSettingsPanel, { boardSlug: selectedBoard }),
+      jsx(ProjectSwitcher, { projects, active: effectiveProjectId, onSelect: (pid) => { setSelectedBoard(null); setActiveProject(pid) } }),
+      boardsError
+        ? jsx('div', { className: 'text-[0.75rem] text-(--ui-danger,#e5484d)', children: boardsError })
+        : null,
+      error
+        ? jsx('div', { className: 'text-[0.75rem] text-(--ui-danger,#e5484d)', children: error })
+        : null,
+      jsx('div', {
+        className: 'flex flex-1 flex-col overflow-y-auto',
+        children:
+          decisions.length === 0
+            ? jsx('div', {
+                className: 'flex h-full items-center justify-center text-(--ui-text-tertiary)',
+                children: loading ? 'Loading…' : 'Queue clear.',
+              })
+            : jsx('div', {
+                // Static NxM grid, 1-3 cols x 1-3 rows (user-adjustable via
+                // GridLayoutControls above, persisted to localStorage) —
+                // "static" means a fixed cell count, not drag-resizable
+                // panes. Shows up to cols*rows cards; anything beyond
+                // that count stays in the queue and appears once a slot
+                // frees up on the next poll/resolve.
+                className: 'grid gap-3',
+                style: {
+                  gridTemplateColumns: `repeat(${gridLayout.cols}, minmax(0, 1fr))`,
+                  gridTemplateRows: `repeat(${gridLayout.rows}, auto)`,
+                },
+                children: decisions
+                  .slice(0, gridLayout.cols * gridLayout.rows)
+                  .map((d) =>
+                    jsx(DecisionCard, { key: d.id, decision: d, onResolve: handleResolve, onDefer: handleDefer, resolving })
+                  ),
+              }),
+      }),
     ],
+  })
+
+  return jsxs('div', {
+    className: 'flex h-full gap-3 p-3 text-sm',
+    // Sidebar renders on whichever side the user picked in settings — left
+    // is the historical default (sidebar first in the children array),
+    // right means the main column renders first instead.
+    children: sidebarSettings.side === 'right'
+      ? [mainColumn, metricsSidebar]
+      : [metricsSidebar, mainColumn],
   })
 }
 
