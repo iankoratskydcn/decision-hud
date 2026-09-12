@@ -2739,6 +2739,8 @@ const SIDEBAR_WIDTH_DEFAULT = 200
 const DIAL_COLS_MIN = 1
 const DIAL_COLS_MAX = 2
 
+const DEFAULT_SIDEBAR_SETTINGS = { side: 'left', widthPx: SIDEBAR_WIDTH_DEFAULT, dialCols: 1 }
+
 // loadSidebarSettings/saveSidebarSettings: side (left/right), widthPx (the
 // sidebar's max-width cap in px, replacing the old hardcoded 200), and
 // dialCols (metric-dial grid column count) all live in one small settings
@@ -2746,18 +2748,25 @@ const DIAL_COLS_MAX = 2
 function loadSidebarSettings() {
   try {
     const raw = localStorage.getItem(SIDEBAR_SETTINGS_STORAGE_KEY)
-    if (!raw) return { side: 'left', widthPx: SIDEBAR_WIDTH_DEFAULT, dialCols: 1 }
+    if (!raw) return { ...DEFAULT_SIDEBAR_SETTINGS }
     const parsed = JSON.parse(raw)
-    const side = parsed.side === 'right' ? 'right' : 'left'
-    const widthPx = Number.isFinite(parsed.widthPx)
-      ? Math.min(SIDEBAR_WIDTH_MAX, Math.max(SIDEBAR_WIDTH_MIN, parsed.widthPx))
+    // parsed can legally be `null` here (`JSON.parse("null")` succeeds and
+    // returns null, it does not throw) — property access on it (parsed.side
+    // below) DOES throw, "Cannot read properties of null (reading 'side')",
+    // which is exactly the live crash reported ("decision-hud:pane" failed
+    // to render). Guard the object shape up front instead of relying on the
+    // outer try/catch to paper over a null/non-object parse result.
+    const safeParsed = parsed && typeof parsed === 'object' && !Array.isArray(parsed) ? parsed : {}
+    const side = safeParsed.side === 'right' ? 'right' : 'left'
+    const widthPx = Number.isFinite(safeParsed.widthPx)
+      ? Math.min(SIDEBAR_WIDTH_MAX, Math.max(SIDEBAR_WIDTH_MIN, safeParsed.widthPx))
       : SIDEBAR_WIDTH_DEFAULT
-    const dialCols = Number.isInteger(parsed.dialCols)
-      ? Math.min(DIAL_COLS_MAX, Math.max(DIAL_COLS_MIN, parsed.dialCols))
+    const dialCols = Number.isInteger(safeParsed.dialCols)
+      ? Math.min(DIAL_COLS_MAX, Math.max(DIAL_COLS_MIN, safeParsed.dialCols))
       : 1
     return { side, widthPx, dialCols }
   } catch {
-    return { side: 'left', widthPx: SIDEBAR_WIDTH_DEFAULT, dialCols: 1 }
+    return { ...DEFAULT_SIDEBAR_SETTINGS }
   }
 }
 
@@ -2912,8 +2921,16 @@ function DialGridControls({ settings, onChange }) {
 // today.
 function SettingsPopover({ layout, onGridChange, sidebarSettings, onSidebarChange }) {
   return jsx('div', {
+    // the old --ui-surface-primary token used here was not a real theme token (checked against
+    // apps/desktop/src/styles.css — it doesn't exist), so it resolved to
+    // transparent: the popover had no real background and the board
+    // selector row underneath bled straight through its text, exactly the
+    // "GRID SIZE / Shattered Flames Client" overlap the owner reported.
+    // --ui-bg-elevated is the real token this app uses for floating
+    // panels/drawers over other content (see kanban/drawer.tsx, the
+    // layout-picker preset menu).
     className:
-      'absolute right-0 top-full z-10 mt-1 w-max rounded-md border border-(--ui-stroke-secondary) bg-(--ui-surface-primary) p-2 shadow-lg',
+      'absolute right-0 top-full z-10 mt-1 w-max rounded-md border border-(--ui-stroke-secondary) bg-(--ui-bg-elevated) p-2 shadow-lg',
     children: jsxs('div', {
       className: 'flex flex-col gap-2',
       children: [
@@ -3294,9 +3311,18 @@ function DecisionHudPane() {
     [refresh]
   )
 
+  // Defensive fallback: sidebarSettings comes from useState(loadSidebarSettings)
+  // and every setter path also goes through loadSidebarSettings-shaped
+  // objects, so this should always be a real object — but this is the exact
+  // spot the live "Cannot read properties of undefined (reading 'side')"
+  // crash would resurface if that ever stopped being true (e.g. a future
+  // change that calls setSidebarSettings(null) directly). Falling back to
+  // the same defaults loadSidebarSettings() itself returns on a bad parse
+  // keeps this component from being a second place that bug can hide.
+  const safeSidebarSettings = sidebarSettings && typeof sidebarSettings === 'object' ? sidebarSettings : DEFAULT_SIDEBAR_SETTINGS
   const metricsSidebar = jsx(MetricsSidebar, {
     metrics, agentHealth,
-    side: sidebarSettings.side, widthPx: sidebarSettings.widthPx, dialCols: sidebarSettings.dialCols,
+    side: safeSidebarSettings.side, widthPx: safeSidebarSettings.widthPx, dialCols: safeSidebarSettings.dialCols,
   })
   const mainColumn = jsxs('div', {
     className: 'flex min-w-0 flex-1 flex-col gap-3',
@@ -3316,8 +3342,12 @@ function DecisionHudPane() {
                 type: 'button',
                 'aria-label': 'Settings',
                 onClick: () => setSettingsOpen((v) => !v),
+                // the old --ui-surface-secondary hover token used here was also a non-existent
+                // token (same class of bug as SettingsPopover's background
+                // above) — --chrome-action-hover is the real hover token
+                // this app uses on icon buttons everywhere else.
                 className:
-                  'flex h-6 w-6 items-center justify-center rounded border border-(--ui-stroke-secondary) text-[0.8rem] text-(--ui-text-secondary) hover:bg-(--ui-surface-secondary)',
+                  'flex h-6 w-6 items-center justify-center rounded border border-(--ui-stroke-secondary) text-[0.8rem] text-(--ui-text-secondary) hover:bg-(--chrome-action-hover)',
                 children: '⚙',
               }),
             ],
@@ -3372,7 +3402,7 @@ function DecisionHudPane() {
     // Sidebar renders on whichever side the user picked in settings — left
     // is the historical default (sidebar first in the children array),
     // right means the main column renders first instead.
-    children: sidebarSettings.side === 'right'
+    children: safeSidebarSettings.side === 'right'
       ? [mainColumn, metricsSidebar]
       : [metricsSidebar, mainColumn],
   })

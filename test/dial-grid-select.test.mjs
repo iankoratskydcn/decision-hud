@@ -19,7 +19,7 @@ assert.match(
 // side/width), not a separate one-off localStorage key.
 assert.match(
   source,
-  /function loadSidebarSettings\(\)[\s\S]{0,800}dialCols/,
+  /function loadSidebarSettings\(\)[\s\S]{0,1200}dialCols/,
   'loadSidebarSettings must load a dialCols field',
 )
 assert.match(

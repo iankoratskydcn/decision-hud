@@ -51,8 +51,13 @@ assert.match(
 )
 assert.match(
   pane,
-  /jsx\(MetricsSidebar,\s*\{[^}]*side:\s*sidebarSettings\.side/,
-  'MetricsSidebar must be rendered with side: sidebarSettings.side',
+  /const safeSidebarSettings = sidebarSettings[\s\S]{0,120}DEFAULT_SIDEBAR_SETTINGS/,
+  'DecisionHudPane must derive a null/undefined-safe view of sidebarSettings before reading its fields (regression: a malformed persisted value must never crash the render — see sidebar-settings-crash.test.mjs)',
+)
+assert.match(
+  pane,
+  /jsx\(MetricsSidebar,\s*\{[^}]*side:\s*safeSidebarSettings\.side/,
+  'MetricsSidebar must be rendered with side: safeSidebarSettings.side (the null-safe view), not the raw possibly-malformed sidebarSettings',
 )
 
 console.log('sidebar-settings (position + size persisted) structural test passed')
