@@ -3030,7 +3030,11 @@ function MetricDial({ label, value, min, max, unit, subtitle }) {
 function MetricsSidebar({ metrics, agentHealth }) {
   const { pendingCount, highUrgencyCount, cardCoverage, boardsTotal, boardsGated, necessity } = metrics
   return jsxs('div', {
-    className: 'flex w-[160px] shrink-0 flex-col gap-3 overflow-y-auto border-r border-(--ui-stroke-secondary) pr-3',
+    // ~1/4 of the pane's horizontal space, capped at 200px so it doesn't
+    // dominate on a wide docked pane — w-1/4 alone would keep growing with
+    // the pane; max-w-[200px] caps it while still shrinking below 1/4 on a
+    // narrow pane instead of overflowing.
+    className: 'flex w-1/4 max-w-[200px] shrink-0 flex-col gap-3 overflow-y-auto border-r border-(--ui-stroke-secondary) pr-3',
     children: [
       jsx('div', {
         className: 'text-[0.65rem] uppercase tracking-wide text-(--ui-text-tertiary)',
