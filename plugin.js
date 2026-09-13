@@ -27,6 +27,7 @@
 import { cn, haptic, host, PALETTE_AREA, ROUTES_AREA, SIDEBAR_NAV_AREA, useValue } from '@hermes/plugin-sdk'
 import { jsx, jsxs } from 'react/jsx-runtime'
 import * as React from 'react'
+import { AgentDashboard, AgentDashboardRoutePlaceholder } from './dashboard/AgentDashboard.js'
 
 const PLUGIN_ID = 'decision-hud'
 const POLL_MS = 4000
@@ -3494,6 +3495,17 @@ export default {
       },
       render: () => jsx(DecisionHudPane, {}),
     })
+    ctx.register({
+      id: `${PLUGIN_ID}:agent-dashboard`,
+      area: 'panes',
+      title: 'Agent Dashboard',
+      data: {
+        placement: 'right',
+        dock: { pane: 'workspace', pos: 'right' },
+        minWidth: '26rem',
+      },
+      render: () => jsx(AgentDashboard, { rest: ctx.rest }),
+    })
     // Sidebar nav row: SidebarNavContribution requires a real `path` (no
     // onClick escape hatch), and this app's router treats any ROUTES_AREA
     // page as content for the MAIN workspace pane, not a way to front an
@@ -3512,6 +3524,12 @@ export default {
       area: ROUTES_AREA,
       data: { path: '/decision-hud' },
       render: () => jsx(DecisionHudRoutePlaceholder, {}),
+    })
+    ctx.register({
+      id: 'agent-dashboard-route',
+      area: ROUTES_AREA,
+      data: { path: '/decision-hud/agent-dashboard' },
+      render: () => jsx(AgentDashboardRoutePlaceholder, {}),
     })
     ctx.register({
       id: 'nav',
