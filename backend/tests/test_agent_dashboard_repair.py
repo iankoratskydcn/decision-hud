@@ -77,6 +77,7 @@ async def test_read_model_serializes_exact_plugin_v1_contract():
             "label": "token_burn_rate",
             "value": 12.5,
             "unit": "tokens/min",
+            "category": "resource",
             "source_window": "telemetry",
             "freshness": "fresh",
         }

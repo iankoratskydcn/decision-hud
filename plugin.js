@@ -255,6 +255,138 @@ function AgentDashboardRoutePlaceholder() {
 }
 // --- End Agent Dashboard -----------------------------------------------
 
+// --- Agent Metrics (full-page route) ------------------------------------
+// Ported from the standalone agent-metrics scaffold plugin
+// (~/.hermes/desktop-plugins/agent-metrics/plugin.js) into this plugin per
+// owner decision: it renders the SAME read-only dashboard read model
+// (DASHBOARD_READ_MODEL_PATH) as the docked AgentDashboard pane above, at
+// full page size, grouped by category — not a second data source, and not
+// backed by mock data. `metrics.category` is optional on the wire (older/
+// synthetic telemetry may omit it); those metrics land in an explicit
+// 'uncategorized' bucket rather than being dropped or guessed into one.
+const AGENT_METRICS_ROUTE_PATH = '/decision-hud/agent-metrics'
+const UNCATEGORIZED_KEY = 'uncategorized'
+
+const AGENT_METRICS_CATEGORY_LABELS = {
+  resource_cost: 'Resource / Cost',
+  quality_correctness: 'Quality / Correctness',
+  task_outcome_quality: 'Task-Outcome Quality',
+  throughput_progress: 'Throughput / Progress',
+  coordination_workflow: 'Coordination / Workflow',
+  human_trust: 'Human Trust (Decision HUD)',
+  latency_responsiveness: 'Latency / Responsiveness',
+  tool_reliability: 'Tool-Use Reliability',
+  security_permissions: 'Security / Permissions',
+  knowledge_freshness: 'Knowledge / Context Freshness',
+  resource: 'Resource',
+  [UNCATEGORIZED_KEY]: 'Uncategorized',
+}
+
+function agentMetricsCategoryLabel(key) {
+  return AGENT_METRICS_CATEGORY_LABELS[key] || key
+}
+
+function groupMetricsByCategory(metrics) {
+  const bounded = boundedDashboardRows(metrics)
+  const byCategory = new Map()
+  for (const metric of bounded.rows) {
+    const key = isDashboardRecord(metric) && typeof metric.category === 'string' && metric.category
+      ? metric.category
+      : UNCATEGORIZED_KEY
+    if (!byCategory.has(key)) byCategory.set(key, [])
+    byCategory.get(key).push(metric)
+  }
+  return { byCategory, omitted: bounded.omitted }
+}
+
+function AgentMetricsCategoryCard({ categoryKey, metrics }) {
+  return jsxs('div', {
+    'data-metrics-category': categoryKey,
+    style: {
+      border: '1px solid var(--ui-stroke-secondary)',
+      borderRadius: '8px',
+      padding: '12px 14px',
+      minWidth: '260px',
+      flex: '1 1 260px',
+    },
+    children: [
+      jsx('div', {
+        style: { fontWeight: 600, marginBottom: '8px', color: 'var(--ui-text-secondary)' },
+        children: agentMetricsCategoryLabel(categoryKey),
+      }),
+      jsx('div', {
+        role: 'list',
+        children: metrics.map((metric, index) => {
+          const item = displayDashboardMetric(metric)
+          return jsxs('div', {
+            'data-metric-row': 'true',
+            role: 'listitem',
+            style: { display: 'flex', justifyContent: 'space-between', padding: '4px 0', fontSize: '12px' },
+            children: [
+              jsx('span', { children: item.label }),
+              jsx('span', { className: 'ml-2', children: item.value }),
+            ],
+          }, isDashboardRecord(metric) ? (metric.key || index) : index)
+        }),
+      }),
+    ],
+  })
+}
+
+function AgentMetricsPageBody({ snapshot }) {
+  const { byCategory, omitted } = groupMetricsByCategory(snapshot.metrics)
+  const categoryKeys = Array.from(byCategory.keys())
+  if (categoryKeys.length === 0) {
+    return jsx(DashboardMessageState, { children: 'No metrics available' })
+  }
+  return jsxs('div', {
+    children: [
+      jsxs('div', { children: [jsx('span', { className: 'font-medium', children: 'Scope: ' }), jsx('span', { children: snapshot.scope.project_label })] }),
+      jsx('div', { className: 'text-(--ui-text-tertiary)', children: dashboardStatusText(snapshot) }),
+      omitted > 0 ? jsx('div', { className: 'text-(--ui-text-tertiary)', children: `${omitted} metrics omitted (showing ${DASHBOARD_MAX_ROWS})` }) : null,
+      jsx('div', {
+        style: { display: 'flex', flexWrap: 'wrap', gap: '12px', marginTop: '12px' },
+        children: categoryKeys.map((key) => jsx(AgentMetricsCategoryCard, { categoryKey: key, metrics: byCategory.get(key) }, key)),
+      }),
+    ],
+  })
+}
+
+function AgentMetricsPage({ rest }) {
+  const [state, setState] = React.useState({ loading: true, snapshot: null, error: null })
+  React.useLayoutEffect(() => {
+    let active = true
+    let request
+    try {
+      const { projectId, token } = loadDashboardScope()
+      const query = { limit: DASHBOARD_MAX_ROWS }
+      if (projectId) query.project_id = projectId
+      const headers = token ? { Authorization: `Bearer ${token}` } : undefined
+      request = rest(DASHBOARD_READ_MODEL_PATH, { method: 'GET', query, headers })
+    } catch (error) {
+      if (active) setState({ loading: false, snapshot: null, error: String(error?.message || error) })
+      return () => { active = false }
+    }
+    request.then((response) => {
+      const snapshot = validateDashboardSnapshot(response)
+      if (active) setState({ loading: false, snapshot, error: null })
+    }).catch((error) => {
+      if (active) setState({ loading: false, snapshot: null, error: String(error?.message || error) })
+    })
+    return () => { active = false }
+  }, [rest])
+
+  return jsxs('section', {
+    'aria-label': 'Agent Metrics',
+    className: 'flex h-full flex-col gap-3 overflow-auto p-4 text-sm',
+    children: [
+      jsx('div', { className: 'font-medium', children: 'Agent Metrics' }),
+      state.loading ? jsx(DashboardLoadingState, {}) : state.error ? jsx(DashboardMessageState, { children: `Dashboard unavailable: ${state.error}` }) : jsx(AgentMetricsPageBody, { snapshot: state.snapshot }),
+    ],
+  })
+}
+// --- End Agent Metrics ---------------------------------------------------
+
 // F2 authorization: the desktop pane is the interactive-only resolution
 // surface, so it mints ONE actor token per pane session (lazily, on first
 // resolve) via `hermes decision issue-token` and holds the raw value only
@@ -3755,10 +3887,22 @@ export default {
       render: () => jsx(AgentDashboardRoutePlaceholder, {}),
     })
     ctx.register({
+      id: 'agent-metrics-route',
+      area: ROUTES_AREA,
+      data: { path: AGENT_METRICS_ROUTE_PATH },
+      render: () => jsx(AgentMetricsPage, { rest: ctx.rest }),
+    })
+    ctx.register({
       id: 'nav',
       area: SIDEBAR_NAV_AREA,
       order: 55,
       data: { path: '/decision-hud', label: 'Decision HUD', codicon: 'checklist' },
+    })
+    ctx.register({
+      id: 'agent-metrics-nav',
+      area: SIDEBAR_NAV_AREA,
+      order: 56,
+      data: { path: AGENT_METRICS_ROUTE_PATH, label: 'Agent Metrics', codicon: 'graph' },
     })
     // Palette command to re-surface the docked pane specifically (e.g. after
     // closing/minimizing its tab) without going through the route at all.
@@ -3770,6 +3914,16 @@ export default {
         label: 'Decision HUD: Show pane',
         keywords: ['decision', 'hud', 'queue', 'pin', 'pane'],
         run: () => host.revealPane(PANE_ID),
+      },
+    })
+    ctx.register({
+      id: 'open-agent-metrics',
+      area: PALETTE_AREA,
+      data: {
+        id: 'decision-hud.open-agent-metrics',
+        label: 'Agent Metrics: Open full page',
+        keywords: ['agent', 'metrics', 'dashboard', 'graph'],
+        run: () => host.navigate(AGENT_METRICS_ROUTE_PATH),
       },
     })
   },

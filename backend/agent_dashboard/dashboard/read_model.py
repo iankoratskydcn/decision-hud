@@ -67,12 +67,17 @@ class DashboardStatus:
             for key, value in agent.metrics.items():
                 raw_value = value.raw_value if hasattr(value, "raw_value") else value
                 unit = getattr(value, "unit", None)
+                # category is optional on the wire (older/synthetic values may
+                # omit it); consumers that group by category must treat a
+                # missing category as its own explicit bucket, never guess one.
+                category = getattr(value, "category", None)
                 metrics_out.append(
                     {
                         "key": key,
                         "label": key,
                         "value": raw_value,
                         "unit": unit,
+                        "category": category,
                         "source_window": "telemetry",
                         "freshness": "missing" if agent.freshness.state == "missing" else "fresh",
                     }
