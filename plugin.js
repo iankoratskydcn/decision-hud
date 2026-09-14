@@ -267,6 +267,18 @@ function AgentDashboardRoutePlaceholder() {
 const AGENT_METRICS_ROUTE_PATH = '/decision-hud/agent-metrics'
 const UNCATEGORIZED_KEY = 'uncategorized'
 
+// Category -> display-label lookup for the full-page Agent Metrics view.
+// This is a forward-looking, non-exhaustive lookup table — it is NOT a
+// mirror of any backend schema or Python type. As of this writing, the
+// only category value this repo's backend/agent_dashboard code and tests
+// actually emit is the literal string 'resource' (see
+// backend/tests/test_agent_dashboard_repair.py and
+// backend/tests/test_read_only_vertical_slice.py). The remaining entries
+// below are placeholders for categories that may be introduced once the
+// backend emits richer telemetry; they carry no verified contract today.
+// Any category key NOT present here (including future/unknown ones)
+// safely falls back to its raw key text via agentMetricsCategoryLabel
+// below — the fallback, not this map, is what must stay correct.
 const AGENT_METRICS_CATEGORY_LABELS = {
   resource_cost: 'Resource / Cost',
   quality_correctness: 'Quality / Correctness',
