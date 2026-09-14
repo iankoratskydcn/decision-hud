@@ -286,6 +286,29 @@ function agentMetricsCategoryLabel(key) {
   return AGENT_METRICS_CATEGORY_LABELS[key] || key
 }
 
+// Category cards must render in a stable, deterministic order regardless of
+// backend metric-arrival order (Map insertion order is not a contract):
+// known categories follow their fixed position in
+// AGENT_METRICS_CATEGORY_LABELS; unknown categories sort alphabetically
+// after all known ones; UNCATEGORIZED_KEY (the catch-all/degenerate bucket)
+// always renders last, even though it appears earlier in the labels map.
+const AGENT_METRICS_CATEGORY_ORDER_INDEX = new Map(
+  Object.keys(AGENT_METRICS_CATEGORY_LABELS)
+    .filter((key) => key !== UNCATEGORIZED_KEY)
+    .map((key, index) => [key, index])
+)
+
+function sortAgentMetricsCategoryKeys(keys) {
+  return [...keys].sort((a, b) => {
+    if (a === UNCATEGORIZED_KEY) return b === UNCATEGORIZED_KEY ? 0 : 1
+    if (b === UNCATEGORIZED_KEY) return -1
+    const indexA = AGENT_METRICS_CATEGORY_ORDER_INDEX.has(a) ? AGENT_METRICS_CATEGORY_ORDER_INDEX.get(a) : Infinity
+    const indexB = AGENT_METRICS_CATEGORY_ORDER_INDEX.has(b) ? AGENT_METRICS_CATEGORY_ORDER_INDEX.get(b) : Infinity
+    if (indexA !== indexB) return indexA - indexB
+    return a < b ? -1 : a > b ? 1 : 0
+  })
+}
+
 function groupMetricsByCategory(metrics) {
   const bounded = boundedDashboardRows(metrics)
   const byCategory = new Map()
@@ -335,7 +358,7 @@ function AgentMetricsCategoryCard({ categoryKey, metrics }) {
 
 function AgentMetricsPageBody({ snapshot }) {
   const { byCategory, omitted } = groupMetricsByCategory(snapshot.metrics)
-  const categoryKeys = Array.from(byCategory.keys())
+  const categoryKeys = sortAgentMetricsCategoryKeys(byCategory.keys())
   if (categoryKeys.length === 0) {
     return jsx(DashboardMessageState, { children: 'No metrics available' })
   }
