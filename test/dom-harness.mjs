@@ -97,9 +97,21 @@ export function mount(renderFn) {
  *  its own work via setImmediate, which fires AFTER a setTimeout(0) in
  *  Node's event-loop ordering. Chain both so a caller awaiting this once
  *  after mount/click has genuinely let effects AND scheduler-queued work
- *  finish, not just the first of the two. */
-export function flush() {
-  return new Promise((resolve) => setTimeout(() => setImmediate(resolve), 0))
+ *  finish, not just the first of the two.
+ *
+ *  Runs THREE such rounds, not one. A component whose effect kicks off an
+ *  async operation (e.g. a `rest()` fetch) and calls `setState` from that
+ *  promise's `.then()` needs a second scheduler pass to commit that
+ *  follow-up render: round 1 settles the initial commit (e.g. a loading
+ *  state), and the state update from the resolved promise only commits on
+ *  round 2 (a third is slack for anything chaining one more hop). A
+ *  component that only needed one round is unaffected — the extra rounds
+ *  are idle ticks once its effects are already settled. */
+export async function flush() {
+  const round = () => new Promise((resolve) => setTimeout(() => setImmediate(resolve), 0))
+  await round()
+  await round()
+  await round()
 }
 
 /** Find one registration by area + id, same contract as render-harness's

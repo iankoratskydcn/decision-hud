@@ -27,10 +27,233 @@
 import { cn, haptic, host, PALETTE_AREA, ROUTES_AREA, SIDEBAR_NAV_AREA, useValue } from '@hermes/plugin-sdk'
 import { jsx, jsxs } from 'react/jsx-runtime'
 import * as React from 'react'
-import { AgentDashboard, AgentDashboardRoutePlaceholder } from './dashboard/AgentDashboard.js'
 
 const PLUGIN_ID = 'decision-hud'
 const POLL_MS = 4000
+
+// --- Agent Dashboard (additive interface) ----------------------------------
+// Inlined directly in this file — NOT split into dashboard/AgentDashboard.js —
+// because the desktop app's runtime plugin loader evaluates plugin.js as a
+// single blob URL (apps/desktop/src/contrib/runtime-loader.ts). Blob URLs
+// have no hierarchical base, so a relative import like
+// `./dashboard/AgentDashboard.js` can never resolve there even though it
+// resolves fine under Node's real filesystem ESM (which is why the test
+// suite passed while the live desktop app failed with "Failed to resolve
+// module specifier"). The loader only rewrites the bare specifiers
+// @hermes/plugin-sdk, react, react/jsx-runtime, react/jsx-dev-runtime to blob
+// shims (apps/desktop/src/sdk/runtime.ts's sdkImportMap) — notably NOT
+// react-dom, so flushSync is unavailable here too (a second, same-class bug
+// caught before shipping: the loader's unsupportedImports() check rejects
+// any other bare specifier up front with a clear error, rather than the
+// cryptic "Failed to resolve module specifier" a raw failed blob import
+// would throw). Plain setState replaces the flushSync calls below; this
+// pane's own tests only assert on committed render output, not on
+// microtask/macrotask update timing, so the loss of forced synchronous
+// flushing has no observable effect here.
+
+const DASHBOARD_MAX_ROWS = 1000
+const DASHBOARD_READ_MODEL_PATH = '/decision-hud/agent-dashboard'
+
+// Residual integration gap (see docs/agent-dashboard-decision-record.md):
+// the backend HTTP service (backend/agent_dashboard/service/http_app.py)
+// requires an authenticated `project_id` query param and an
+// `Authorization: Bearer <token>` header on every request, and there is no
+// existing mechanism in this plugin (or in the surrounding desktop app
+// surface visible from here) that supplies a selected-project id or an actor
+// token to a docked pane's `rest()` seam. Rather than fabricate a fake global
+// user/session, this reads a small local settings entry
+// (`decision-hud:agent-dashboard-scope` in localStorage, mirroring the
+// existing SIDEBAR_SETTINGS_STORAGE_KEY pattern below) as an explicit,
+// clearly-labeled placeholder wiring point. THIS IS NOT A REAL AUTH
+// MECHANISM: nothing today writes real project/token values into this key.
+// An owner decision is required on where project selection and token
+// issuance actually come from in production (e.g. a workspace-level
+// "selected project" store plus a desktop-issued actor token via ctx/host),
+// and this placeholder should be replaced by that real source once it
+// exists.
+const DASHBOARD_SCOPE_STORAGE_KEY = 'decision-hud:agent-dashboard-scope'
+
+function loadDashboardScope() {
+  try {
+    const raw = typeof localStorage !== 'undefined' ? localStorage.getItem(DASHBOARD_SCOPE_STORAGE_KEY) : null
+    if (!raw) return { projectId: null, token: null }
+    const parsed = JSON.parse(raw)
+    if (!isDashboardRecord(parsed)) return { projectId: null, token: null }
+    return {
+      projectId: typeof parsed.projectId === 'string' && parsed.projectId ? parsed.projectId : null,
+      token: typeof parsed.token === 'string' && parsed.token ? parsed.token : null,
+    }
+  } catch {
+    // best-effort — a missing/corrupt placeholder entry just means the
+    // request below is sent without project_id/Authorization and the
+    // backend will reject it (400/401), which the error state surfaces.
+    return { projectId: null, token: null }
+  }
+}
+
+function isDashboardRecord(value) {
+  return value !== null && typeof value === 'object' && !Array.isArray(value)
+}
+
+function dashboardFiniteNumber(value) {
+  return typeof value === 'number' && Number.isFinite(value)
+}
+
+function validateDashboardSnapshot(value) {
+  if (!isDashboardRecord(value) || value.schema_version !== 'dashboard-read-model.v1') {
+    throw new Error('read model is unavailable')
+  }
+  if (!isDashboardRecord(value.scope) || !value.scope.project_id || !value.scope.project_label) {
+    throw new Error('selected project scope is unavailable')
+  }
+  if (!isDashboardRecord(value.freshness) || !['fresh', 'stale', 'missing'].includes(value.freshness.state)) {
+    throw new Error('freshness state is unavailable')
+  }
+  if (!Array.isArray(value.agents) || !Array.isArray(value.metrics)) {
+    throw new Error('dashboard rows are unavailable')
+  }
+  return value
+}
+
+function boundedDashboardRows(rows) {
+  return { rows: rows.slice(0, DASHBOARD_MAX_ROWS), omitted: Math.max(0, rows.length - DASHBOARD_MAX_ROWS) }
+}
+
+function displayDashboardMetric(metric) {
+  if (!isDashboardRecord(metric)) return { label: 'Metric', value: 'Unavailable' }
+  if (metric.state === 'unavailable' || !dashboardFiniteNumber(metric.value) && typeof metric.value !== 'string') {
+    return { label: metric.label || metric.key || 'Metric', value: metric.reason || 'Unavailable' }
+  }
+  return {
+    label: metric.label || metric.key || 'Metric',
+    value: `${String(metric.value)}${metric.unit ? ` ${String(metric.unit)}` : ''}`,
+    window: metric.source_window,
+  }
+}
+
+function dashboardStatusText(snapshot) {
+  if (snapshot.freshness.state === 'missing') return 'No data'
+  return snapshot.freshness.state === 'stale' ? 'Stale' : 'Live'
+}
+
+function DashboardLoadingState() {
+  return jsx('div', { role: 'status', children: 'Loading Agent Dashboard…' })
+}
+
+function DashboardMessageState({ children }) {
+  return jsx('div', { role: 'status', children })
+}
+
+function DashboardAgentRows({ agents }) {
+  const bounded = boundedDashboardRows(agents)
+  return jsxs('div', {
+    children: [
+      jsx('div', { className: 'mb-1 font-medium', children: 'Agents' }),
+      jsx('div', {
+        role: 'list',
+        children: bounded.rows.map((agent, index) => jsxs('div', {
+          'data-agent-row': 'true',
+          role: 'listitem',
+          children: [
+            jsx('span', { children: isDashboardRecord(agent) ? (agent.label || agent.agent_id || 'Agent') : 'Unavailable' }),
+            jsx('span', { className: 'ml-2 text-(--ui-text-tertiary)', children: isDashboardRecord(agent) ? (agent.status === 'running' ? 'Active' : (agent.status || 'Unavailable')) : 'Unavailable' }),
+          ],
+        }, isDashboardRecord(agent) ? (agent.agent_id || index) : index)),
+      }),
+      bounded.omitted > 0 ? jsx('div', { className: 'text-(--ui-text-tertiary)', children: `${bounded.omitted} agents omitted (showing ${DASHBOARD_MAX_ROWS})` }) : null,
+    ],
+  })
+}
+
+function DashboardMetricRows({ metrics }) {
+  const bounded = boundedDashboardRows(metrics)
+  return jsxs('div', {
+    children: [
+      jsx('div', { className: 'mb-1 font-medium', children: 'Metrics' }),
+      jsx('div', {
+        role: 'list',
+        children: bounded.rows.map((metric, index) => {
+          const item = displayDashboardMetric(metric)
+          return jsxs('div', {
+            'data-metric-row': 'true',
+            children: [
+              jsx('span', { children: item.label }),
+              jsx('span', { className: 'ml-2', children: item.value }),
+              item.window ? jsx('span', { className: 'ml-2 text-(--ui-text-tertiary)', children: item.window }) : null,
+            ],
+          }, index)
+        }),
+      }),
+      bounded.omitted > 0 ? jsx('div', { className: 'text-(--ui-text-tertiary)', children: `${bounded.omitted} metrics omitted (showing ${DASHBOARD_MAX_ROWS})` }) : null,
+    ],
+  })
+}
+
+function DashboardContentBody({ snapshot }) {
+  return jsxs('div', {
+    className: 'flex flex-col gap-3',
+    children: [
+      jsxs('div', { children: [jsx('span', { className: 'font-medium', children: 'Scope: ' }), jsx('span', { children: snapshot.scope.project_label })] }),
+      jsx('div', { className: 'text-(--ui-text-tertiary)', children: dashboardStatusText(snapshot) }),
+      jsx(DashboardAgentRows, { agents: snapshot.agents }),
+      jsx(DashboardMetricRows, { metrics: snapshot.metrics }),
+    ],
+  })
+}
+
+function AgentDashboard({ rest }) {
+  const [state, setState] = React.useState({ loading: true, snapshot: null, error: null })
+  React.useLayoutEffect(() => {
+    let active = true
+    let request
+    try {
+      const { projectId, token } = loadDashboardScope()
+      const query = { limit: DASHBOARD_MAX_ROWS }
+      if (projectId) query.project_id = projectId
+      const headers = token ? { Authorization: `Bearer ${token}` } : undefined
+      request = rest(DASHBOARD_READ_MODEL_PATH, { method: 'GET', query, headers })
+    } catch (error) {
+      if (active) setState({ loading: false, snapshot: null, error: String(error?.message || error) })
+      return () => { active = false }
+    }
+    request.then((response) => {
+      const snapshot = validateDashboardSnapshot(response)
+      if (active) setState({ loading: false, snapshot, error: null })
+    }).catch((error) => {
+      if (active) setState({ loading: false, snapshot: null, error: String(error?.message || error) })
+    })
+    return () => { active = false }
+  }, [rest])
+
+  return jsxs('section', {
+    'aria-label': 'Agent Dashboard',
+    className: 'flex h-full flex-col gap-3 p-3 text-sm',
+    children: [
+      jsx('div', { className: 'font-medium', children: 'Agent Dashboard' }),
+      state.loading ? jsx(DashboardLoadingState, {}) : state.error ? jsx(DashboardMessageState, { children: `Dashboard unavailable: ${state.error}` }) : jsx(DashboardContentBody, { snapshot: state.snapshot }),
+    ],
+  })
+}
+
+function AgentDashboardRoutePlaceholder() {
+  return jsxs('div', {
+    className: 'flex h-full flex-col items-center justify-center gap-3 p-6 text-center text-sm text-(--ui-text-secondary)',
+    children: [
+      jsx('div', { key: 'title', className: 'font-medium', children: 'Agent Dashboard' }),
+      jsx('div', { key: 'body', className: 'max-w-sm text-[0.8rem] text-(--ui-text-tertiary)', children: 'Show Agent Dashboard in the docked pane.' }),
+      jsx('button', {
+        key: 'reveal',
+        type: 'button',
+        'aria-label': 'Show Agent Dashboard',
+        onClick: () => host.revealPane('decision-hud:agent-dashboard'),
+        className:
+          'rounded-md border border-(--ui-stroke-secondary) px-3 py-1.5 text-[0.8rem] font-medium hover:bg-(--chrome-action-hover)',
+        children: 'Show Agent Dashboard',
+      }),
+    ],
+  })
+}
+// --- End Agent Dashboard -----------------------------------------------
 
 // F2 authorization: the desktop pane is the interactive-only resolution
 // surface, so it mints ONE actor token per pane session (lazily, on first
