@@ -1,0 +1,18 @@
+[tool.pytest.ini_options]
+addopts = "-ra"
+testpaths = ["backend/tests"]
+pythonpath = ["backend"]
+asyncio_mode = "auto"
+markers = [
+  "integration: requires a disposable real PostgreSQL database",
+]
+
+[project]
+name = "decision-hud-backend-tests"
+version = "0.0.0"
+requires-python = ">=3.11"
+dependencies = [
+  "pytest>=8",
+  "pytest-asyncio>=0.23",
+  "psycopg[binary]>=3.2",
+]
