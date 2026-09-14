@@ -267,6 +267,18 @@ function AgentDashboardRoutePlaceholder() {
 const AGENT_METRICS_ROUTE_PATH = '/decision-hud/agent-metrics'
 const UNCATEGORIZED_KEY = 'uncategorized'
 
+// Category -> display-label lookup for the full-page Agent Metrics view.
+// This is a forward-looking, non-exhaustive lookup table — it is NOT a
+// mirror of any backend schema or Python type. As of this writing, the
+// only category value this repo's backend/agent_dashboard code and tests
+// actually emit is the literal string 'resource' (see
+// backend/tests/test_agent_dashboard_repair.py and
+// backend/tests/test_read_only_vertical_slice.py). The remaining entries
+// below are placeholders for categories that may be introduced once the
+// backend emits richer telemetry; they carry no verified contract today.
+// Any category key NOT present here (including future/unknown ones)
+// safely falls back to its raw key text via agentMetricsCategoryLabel
+// below — the fallback, not this map, is what must stay correct.
 const AGENT_METRICS_CATEGORY_LABELS = {
   resource_cost: 'Resource / Cost',
   quality_correctness: 'Quality / Correctness',
@@ -284,6 +296,29 @@ const AGENT_METRICS_CATEGORY_LABELS = {
 
 function agentMetricsCategoryLabel(key) {
   return AGENT_METRICS_CATEGORY_LABELS[key] || key
+}
+
+// Category cards must render in a stable, deterministic order regardless of
+// backend metric-arrival order (Map insertion order is not a contract):
+// known categories follow their fixed position in
+// AGENT_METRICS_CATEGORY_LABELS; unknown categories sort alphabetically
+// after all known ones; UNCATEGORIZED_KEY (the catch-all/degenerate bucket)
+// always renders last, even though it appears earlier in the labels map.
+const AGENT_METRICS_CATEGORY_ORDER_INDEX = new Map(
+  Object.keys(AGENT_METRICS_CATEGORY_LABELS)
+    .filter((key) => key !== UNCATEGORIZED_KEY)
+    .map((key, index) => [key, index])
+)
+
+function sortAgentMetricsCategoryKeys(keys) {
+  return [...keys].sort((a, b) => {
+    if (a === UNCATEGORIZED_KEY) return b === UNCATEGORIZED_KEY ? 0 : 1
+    if (b === UNCATEGORIZED_KEY) return -1
+    const indexA = AGENT_METRICS_CATEGORY_ORDER_INDEX.has(a) ? AGENT_METRICS_CATEGORY_ORDER_INDEX.get(a) : Infinity
+    const indexB = AGENT_METRICS_CATEGORY_ORDER_INDEX.has(b) ? AGENT_METRICS_CATEGORY_ORDER_INDEX.get(b) : Infinity
+    if (indexA !== indexB) return indexA - indexB
+    return a < b ? -1 : a > b ? 1 : 0
+  })
 }
 
 function groupMetricsByCategory(metrics) {
@@ -335,7 +370,7 @@ function AgentMetricsCategoryCard({ categoryKey, metrics }) {
 
 function AgentMetricsPageBody({ snapshot }) {
   const { byCategory, omitted } = groupMetricsByCategory(snapshot.metrics)
-  const categoryKeys = Array.from(byCategory.keys())
+  const categoryKeys = sortAgentMetricsCategoryKeys(byCategory.keys())
   if (categoryKeys.length === 0) {
     return jsx(DashboardMessageState, { children: 'No metrics available' })
   }
@@ -3916,15 +3951,19 @@ export default {
         run: () => host.revealPane(PANE_ID),
       },
     })
-    ctx.register({
-      id: 'open-agent-metrics',
-      area: PALETTE_AREA,
-      data: {
-        id: 'decision-hud.open-agent-metrics',
-        label: 'Agent Metrics: Open full page',
-        keywords: ['agent', 'metrics', 'dashboard', 'graph'],
-        run: () => host.navigate(AGENT_METRICS_ROUTE_PATH),
-      },
-    })
+    // No palette command for the Agent Metrics full page: unlike every other
+    // affordance in this file, reaching a ROUTES_AREA page from a palette
+    // command has no mechanism here that's proven live. host.revealPane
+    // targets a `panes` registration (PANE_ID here), not a route, so it
+    // can't front this page; the only thing that CAN change the active
+    // route is host.navigate, which this file never calls anywhere else and
+    // which the test harness's fake @hermes/plugin-sdk stubs out as a no-op
+    // identical in shape to its revealPane stub — a green test here would
+    // prove nothing about whether the real desktop app's host.navigate
+    // actually works (see commit 9d31e1a, where an equally test-clean but
+    // unverified mechanism broke live). The page is already reachable
+    // through 'agent-metrics-nav' above, which uses the SAME `path` field
+    // the router already resolves for every other route in this plugin —
+    // no new, unverified capability required.
   },
 }

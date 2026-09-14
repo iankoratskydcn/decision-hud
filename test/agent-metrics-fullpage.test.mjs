@@ -1,4 +1,6 @@
 import assert from 'node:assert/strict'
+import { readFileSync } from 'node:fs'
+import { fileURLToPath } from 'node:url'
 import { collectRegistrations as collectRendered, renderRegistration } from './render-harness.mjs'
 import { mount, flush, installLocalStorageStub } from './dom-harness.mjs'
 
@@ -93,6 +95,29 @@ async function mountPage(response) {
   await mounted.unmount()
 }
 
+// Stable category ordering: rendered card order must follow the fixed
+// AGENT_METRICS_CATEGORY_LABELS key order for known categories, regardless
+// of the arrival order of metrics[] from the backend (Map insertion order
+// is not a stable contract). Unknown categories not in that map sort
+// alphabetically after all known ones. 'uncategorized' always renders last,
+// even though it appears earliest in AGENT_METRICS_CATEGORY_LABELS.
+{
+  const scrambledSnapshot = {
+    ...validSnapshot,
+    metrics: [
+      { key: 'legacy_metric', label: 'legacy_metric', value: 1, unit: null, source_window: 'telemetry', freshness: 'fresh' },
+      { key: 'ctx_age', label: 'ctx_age', value: 3, unit: 'min', category: 'knowledge_freshness', source_window: 'telemetry', freshness: 'fresh' },
+      { key: 'token_cost', label: 'token_cost', value: 9, unit: 'usd', category: 'resource_cost', source_window: 'telemetry', freshness: 'fresh' },
+      { key: 'zzz_metric', label: 'zzz_metric', value: 2, unit: null, category: 'zzz_future_category', source_window: 'telemetry', freshness: 'fresh' },
+    ],
+  }
+  const mounted = await mountPage(scrambledSnapshot)
+  const cards = [...mounted.container.querySelectorAll('[data-metrics-category]')]
+  const order = cards.map((el) => el.getAttribute('data-metrics-category'))
+  assert.deepEqual(order, ['resource_cost', 'knowledge_freshness', 'zzz_future_category', 'uncategorized'])
+  await mounted.unmount()
+}
+
 // Loading state.
 {
   const mounted = await mountPage(new Promise(() => {}))
@@ -106,6 +131,41 @@ async function mountPage(response) {
   assert.match(text(mounted.container), /unavailable|error/i)
   assert.equal(mounted.errors.length, 0)
   await mounted.unmount()
+}
+
+// Unrecognized/future category keys must render using the raw key text
+// as their visible category label (the safe fallback in
+// agentMetricsCategoryLabel), since the label map is a forward-looking,
+// non-exhaustive lookup table, not a verified/exhaustive contract.
+{
+  const snapshotWithNovelCategory = {
+    ...validSnapshot,
+    metrics: [
+      {
+        key: 'novel_metric',
+        label: 'novel_metric',
+        value: 7,
+        unit: null,
+        category: 'novel_future_category_xyz',
+        source_window: 'telemetry',
+        freshness: 'fresh',
+      },
+    ],
+  }
+  const mounted = await mountPage(snapshotWithNovelCategory)
+  const rendered = text(mounted.container)
+  assert.match(rendered, /novel_future_category_xyz/i, 'unrecognized category must fall back to its raw key as the label')
+  assert.equal(mounted.errors.length, 0)
+  await mounted.unmount()
+}
+
+// The category-label map's comment must not claim a mirrored Python
+// module that does not exist anywhere in this repo's backend/ tree.
+{
+  const pluginPath = fileURLToPath(new URL('../plugin.js', import.meta.url))
+  const pluginSource = readFileSync(pluginPath, 'utf8')
+  assert.doesNotMatch(pluginSource, /db\/metrics_db\.py/, 'plugin.js must not claim a nonexistent mirrored Python module')
+  assert.doesNotMatch(pluginSource, /MetricCategory/, 'plugin.js must not reference a nonexistent MetricCategory type')
 }
 
 console.log('agent-metrics-fullpage acceptance tests reached')
