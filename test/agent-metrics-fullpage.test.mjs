@@ -1,4 +1,6 @@
 import assert from 'node:assert/strict'
+import { readFileSync } from 'node:fs'
+import { fileURLToPath } from 'node:url'
 import { collectRegistrations as collectRendered, renderRegistration } from './render-harness.mjs'
 import { mount, flush, installLocalStorageStub } from './dom-harness.mjs'
 
@@ -106,6 +108,41 @@ async function mountPage(response) {
   assert.match(text(mounted.container), /unavailable|error/i)
   assert.equal(mounted.errors.length, 0)
   await mounted.unmount()
+}
+
+// Unrecognized/future category keys must render using the raw key text
+// as their visible category label (the safe fallback in
+// agentMetricsCategoryLabel), since the label map is a forward-looking,
+// non-exhaustive lookup table, not a verified/exhaustive contract.
+{
+  const snapshotWithNovelCategory = {
+    ...validSnapshot,
+    metrics: [
+      {
+        key: 'novel_metric',
+        label: 'novel_metric',
+        value: 7,
+        unit: null,
+        category: 'novel_future_category_xyz',
+        source_window: 'telemetry',
+        freshness: 'fresh',
+      },
+    ],
+  }
+  const mounted = await mountPage(snapshotWithNovelCategory)
+  const rendered = text(mounted.container)
+  assert.match(rendered, /novel_future_category_xyz/i, 'unrecognized category must fall back to its raw key as the label')
+  assert.equal(mounted.errors.length, 0)
+  await mounted.unmount()
+}
+
+// The category-label map's comment must not claim a mirrored Python
+// module that does not exist anywhere in this repo's backend/ tree.
+{
+  const pluginPath = fileURLToPath(new URL('../plugin.js', import.meta.url))
+  const pluginSource = readFileSync(pluginPath, 'utf8')
+  assert.doesNotMatch(pluginSource, /db\/metrics_db\.py/, 'plugin.js must not claim a nonexistent mirrored Python module')
+  assert.doesNotMatch(pluginSource, /MetricCategory/, 'plugin.js must not reference a nonexistent MetricCategory type')
 }
 
 console.log('agent-metrics-fullpage acceptance tests reached')
