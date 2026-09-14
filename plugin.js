@@ -3916,15 +3916,19 @@ export default {
         run: () => host.revealPane(PANE_ID),
       },
     })
-    ctx.register({
-      id: 'open-agent-metrics',
-      area: PALETTE_AREA,
-      data: {
-        id: 'decision-hud.open-agent-metrics',
-        label: 'Agent Metrics: Open full page',
-        keywords: ['agent', 'metrics', 'dashboard', 'graph'],
-        run: () => host.navigate(AGENT_METRICS_ROUTE_PATH),
-      },
-    })
+    // No palette command for the Agent Metrics full page: unlike every other
+    // affordance in this file, reaching a ROUTES_AREA page from a palette
+    // command has no mechanism here that's proven live. host.revealPane
+    // targets a `panes` registration (PANE_ID here), not a route, so it
+    // can't front this page; the only thing that CAN change the active
+    // route is host.navigate, which this file never calls anywhere else and
+    // which the test harness's fake @hermes/plugin-sdk stubs out as a no-op
+    // identical in shape to its revealPane stub — a green test here would
+    // prove nothing about whether the real desktop app's host.navigate
+    // actually works (see commit 9d31e1a, where an equally test-clean but
+    // unverified mechanism broke live). The page is already reachable
+    // through 'agent-metrics-nav' above, which uses the SAME `path` field
+    // the router already resolves for every other route in this plugin —
+    // no new, unverified capability required.
   },
 }
