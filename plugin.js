@@ -52,42 +52,122 @@ const POLL_MS = 4000
 // flushing has no observable effect here.
 
 const DASHBOARD_MAX_ROWS = 1000
-const DASHBOARD_READ_MODEL_PATH = '/decision-hud/agent-dashboard'
+// `ctx.rest(path)` is already scoped under `/api/plugins/<plugin-id>/...` by
+// the desktop host (plugin-id == 'decision-hud'), so a path that repeats the
+// plugin id here doubles the segment: `/decision-hud/agent-dashboard` became
+// `/api/plugins/decision-hud/decision-hud/agent-dashboard` -> 404 "No such
+// API endpoint". The backend HTTP service's own route
+// (backend/agent_dashboard/service/http_app.py, _ROUTE_PATH) is a separate,
+// unscoped loopback path and is unaffected by this — only the gateway-facing
+// path passed to `rest()` needs the plugin-id segment dropped.
+const DASHBOARD_READ_MODEL_PATH = '/agent-dashboard'
 
-// Residual integration gap (see docs/agent-dashboard-decision-record.md):
-// the backend HTTP service (backend/agent_dashboard/service/http_app.py)
-// requires an authenticated `project_id` query param and an
-// `Authorization: Bearer <token>` header on every request, and there is no
-// existing mechanism in this plugin (or in the surrounding desktop app
-// surface visible from here) that supplies a selected-project id or an actor
-// token to a docked pane's `rest()` seam. Rather than fabricate a fake global
-// user/session, this reads a small local settings entry
-// (`decision-hud:agent-dashboard-scope` in localStorage, mirroring the
-// existing SIDEBAR_SETTINGS_STORAGE_KEY pattern below) as an explicit,
-// clearly-labeled placeholder wiring point. THIS IS NOT A REAL AUTH
-// MECHANISM: nothing today writes real project/token values into this key.
-// An owner decision is required on where project selection and token
-// issuance actually come from in production (e.g. a workspace-level
-// "selected project" store plus a desktop-issued actor token via ctx/host),
-// and this placeholder should be replaced by that real source once it
-// exists.
-const DASHBOARD_SCOPE_STORAGE_KEY = 'decision-hud:agent-dashboard-scope'
+// Real wiring (owner decision, 2026-09-14, supersedes the placeholder this
+// comment used to describe): project scope for the dashboard IS the
+// currently-selected Kanban board. DecisionHudPane's own board selector
+// (BoardSelector / selectedBoard) and this pane are SEPARATE registered
+// panes/routes with no shared React tree, so the selection is persisted to
+// `SELECTED_BOARD_STORAGE_KEY` in localStorage by DecisionHudPane and read
+// here — same cross-pane-persistence shape as SIDEBAR_SETTINGS_STORAGE_KEY
+// below, just keyed differently. `useKanbanBoards()` + `board.project_id`
+// resolve the slug to a project id exactly like DecisionHudPane's own
+// selectedBoardProjectId cross-link (search that name for the fuller
+// history of the board<->project_id link). The actor token is minted per
+// project via `hermes decision issue-token --actor desktop-pane
+// --project-id <id>` (decision-hud plugin cli.py, `_cmd_issue_token` +
+// `_agent_dashboard_auth_module()`), which calls the agent-dashboard
+// backend's `issue_project_actor_token()` — same token format/verification
+// as the unscoped token used elsewhere in this file (getActorToken), just
+// with an added project claim, minted fresh per project (not reused across
+// projects, since a token proves exactly one project claim; see
+// useProjectActorToken below). No board selected -> no project_id -> the
+// pane shows an explicit "select a board in Decision HUD" state rather than
+// issuing an unscoped/failing request.
+const SELECTED_BOARD_STORAGE_KEY = 'decision-hud:selected-board'
 
-function loadDashboardScope() {
+function loadSelectedBoardSlug() {
   try {
-    const raw = typeof localStorage !== 'undefined' ? localStorage.getItem(DASHBOARD_SCOPE_STORAGE_KEY) : null
-    if (!raw) return { projectId: null, token: null }
-    const parsed = JSON.parse(raw)
-    if (!isDashboardRecord(parsed)) return { projectId: null, token: null }
-    return {
-      projectId: typeof parsed.projectId === 'string' && parsed.projectId ? parsed.projectId : null,
-      token: typeof parsed.token === 'string' && parsed.token ? parsed.token : null,
-    }
+    const raw = typeof localStorage !== 'undefined' ? localStorage.getItem(SELECTED_BOARD_STORAGE_KEY) : null
+    return typeof raw === 'string' && raw ? raw : null
   } catch {
-    // best-effort — a missing/corrupt placeholder entry just means the
-    // request below is sent without project_id/Authorization and the
-    // backend will reject it (400/401), which the error state surfaces.
-    return { projectId: null, token: null }
+    return null
+  }
+}
+
+function saveSelectedBoardSlug(slug) {
+  try {
+    if (typeof localStorage === 'undefined') return
+    if (slug) localStorage.setItem(SELECTED_BOARD_STORAGE_KEY, slug)
+    else localStorage.removeItem(SELECTED_BOARD_STORAGE_KEY)
+  } catch {
+    // best-effort persistence only — a write failure just means the
+    // board selection doesn't survive a reload/other-pane read, not a
+    // functional error in the pane that made the selection.
+  }
+}
+
+// Shared by AgentDashboard and AgentMetricsPage: resolve the persisted
+// selected-board slug to { projectId, boardsLoading, boardsError } via the
+// same useKanbanBoards() used by DecisionHudPane, then mint (and cache, per
+// projectId) a project-scoped actor token. Re-resolves on every mount since
+// these are routed/docked panes that can be reopened long after the token's
+// TTL — unlike getActorToken()'s single long-lived module-level promise,
+// this is deliberately NOT cached across projectId changes (see comment
+// block above this constant).
+function useProjectDashboardScope() {
+  const [boardSlug, setBoardSlug] = React.useState(loadSelectedBoardSlug)
+  const { boards, loading: boardsLoading, error: boardsError } = useKanbanBoards()
+  const [tokenState, setTokenState] = React.useState({ token: null, loading: false, error: null })
+
+  // Pick up a board selection made in the DecisionHudPane tab after this
+  // pane already mounted (e.g. user switches board, then opens Agent
+  // Metrics) — storage events fire in OTHER same-origin tabs/frames, which
+  // is exactly the desktop app's docked-pane-vs-routed-page relationship.
+  React.useEffect(() => {
+    function onStorage(e) {
+      if (e.key === SELECTED_BOARD_STORAGE_KEY) setBoardSlug(e.newValue || null)
+    }
+    if (typeof window !== 'undefined' && window.addEventListener) {
+      window.addEventListener('storage', onStorage)
+      return () => window.removeEventListener('storage', onStorage)
+    }
+    return undefined
+  }, [])
+
+  const projectId = React.useMemo(() => {
+    if (!boardSlug) return null
+    const board = boards.find((b) => b && b.slug === boardSlug)
+    return board ? board.project_id || null : null
+  }, [boards, boardSlug])
+
+  React.useEffect(() => {
+    let active = true
+    if (!projectId) {
+      setTokenState({ token: null, loading: false, error: null })
+      return () => { active = false }
+    }
+    setTokenState({ token: null, loading: true, error: null })
+    cliExec(['decision', 'issue-token', '--actor', 'desktop-pane', '--project-id', projectId])
+      .then((res) => {
+        if (!active) return
+        if (!res || !res.ok || !res.actor_token) {
+          setTokenState({ token: null, loading: false, error: (res && res.error) || 'failed to obtain project actor token' })
+          return
+        }
+        setTokenState({ token: res.actor_token, loading: false, error: null })
+      })
+      .catch((e) => {
+        if (active) setTokenState({ token: null, loading: false, error: String(e.message || e) })
+      })
+    return () => { active = false }
+  }, [projectId])
+
+  return {
+    boardSlug,
+    projectId,
+    token: tokenState.token,
+    loading: boardsLoading || tokenState.loading,
+    error: boardsError || tokenState.error,
   }
 }
 
@@ -203,27 +283,31 @@ function DashboardContentBody({ snapshot }) {
 
 function AgentDashboard({ rest }) {
   const [state, setState] = React.useState({ loading: true, snapshot: null, error: null })
+  const scope = useProjectDashboardScope()
   React.useLayoutEffect(() => {
     let active = true
-    let request
-    try {
-      const { projectId, token } = loadDashboardScope()
-      const query = { limit: DASHBOARD_MAX_ROWS }
-      if (projectId) query.project_id = projectId
-      const headers = token ? { Authorization: `Bearer ${token}` } : undefined
-      request = rest(DASHBOARD_READ_MODEL_PATH, { method: 'GET', query, headers })
-    } catch (error) {
-      if (active) setState({ loading: false, snapshot: null, error: String(error?.message || error) })
+    if (scope.loading) {
+      setState({ loading: true, snapshot: null, error: null })
       return () => { active = false }
     }
-    request.then((response) => {
+    if (!scope.projectId) {
+      setState({ loading: false, snapshot: null, error: scope.error || 'Select a board in Decision HUD to scope the Agent Dashboard' })
+      return () => { active = false }
+    }
+    if (!scope.token) {
+      setState({ loading: false, snapshot: null, error: scope.error || 'Unable to obtain a project-scoped actor token' })
+      return () => { active = false }
+    }
+    const query = { limit: DASHBOARD_MAX_ROWS, project_id: scope.projectId }
+    const headers = { Authorization: `Bearer ${scope.token}` }
+    rest(DASHBOARD_READ_MODEL_PATH, { method: 'GET', query, headers }).then((response) => {
       const snapshot = validateDashboardSnapshot(response)
       if (active) setState({ loading: false, snapshot, error: null })
     }).catch((error) => {
       if (active) setState({ loading: false, snapshot: null, error: String(error?.message || error) })
     })
     return () => { active = false }
-  }, [rest])
+  }, [rest, scope.loading, scope.projectId, scope.token, scope.error])
 
   return jsxs('section', {
     'aria-label': 'Agent Dashboard',
@@ -389,27 +473,31 @@ function AgentMetricsPageBody({ snapshot }) {
 
 function AgentMetricsPage({ rest }) {
   const [state, setState] = React.useState({ loading: true, snapshot: null, error: null })
+  const scope = useProjectDashboardScope()
   React.useLayoutEffect(() => {
     let active = true
-    let request
-    try {
-      const { projectId, token } = loadDashboardScope()
-      const query = { limit: DASHBOARD_MAX_ROWS }
-      if (projectId) query.project_id = projectId
-      const headers = token ? { Authorization: `Bearer ${token}` } : undefined
-      request = rest(DASHBOARD_READ_MODEL_PATH, { method: 'GET', query, headers })
-    } catch (error) {
-      if (active) setState({ loading: false, snapshot: null, error: String(error?.message || error) })
+    if (scope.loading) {
+      setState({ loading: true, snapshot: null, error: null })
       return () => { active = false }
     }
-    request.then((response) => {
+    if (!scope.projectId) {
+      setState({ loading: false, snapshot: null, error: scope.error || 'Select a board in Decision HUD to scope Agent Metrics' })
+      return () => { active = false }
+    }
+    if (!scope.token) {
+      setState({ loading: false, snapshot: null, error: scope.error || 'Unable to obtain a project-scoped actor token' })
+      return () => { active = false }
+    }
+    const query = { limit: DASHBOARD_MAX_ROWS, project_id: scope.projectId }
+    const headers = { Authorization: `Bearer ${scope.token}` }
+    rest(DASHBOARD_READ_MODEL_PATH, { method: 'GET', query, headers }).then((response) => {
       const snapshot = validateDashboardSnapshot(response)
       if (active) setState({ loading: false, snapshot, error: null })
     }).catch((error) => {
       if (active) setState({ loading: false, snapshot: null, error: String(error?.message || error) })
     })
     return () => { active = false }
-  }, [rest])
+  }, [rest, scope.loading, scope.projectId, scope.token, scope.error])
 
   return jsxs('section', {
     'aria-label': 'Agent Metrics',
@@ -2912,8 +3000,14 @@ function DecisionCard({ decision, onResolve, onDefer, resolving }) {
 
 function useBoardSettings(boardSlug) {
   // Fetches dispatch_enabled/auto_decompose_enabled/review_dispatch_enabled for
-  // one board via `hermes kanban boards show <slug> --json`. Only fetches when
-  // boardSlug is a real slug (never for "All" — that's selectedBoard === null).
+  // one board. The installed CLI's `hermes kanban boards show` takes NO slug
+  // argument and NO --json flag (it only prints the currently-active board
+  // slug as plain text) — that API drifted out from under this plugin, which
+  // used to call `boards show <slug> --json`. `boards list --json` still
+  // returns the full per-board object including these fields, so filter that
+  // instead of relying on the (now argument-less) `show` subcommand. Only
+  // fetches when boardSlug is a real slug (never for "All" — selectedBoard
+  // === null).
   const [state, setState] = React.useState({ settings: null, loading: false, error: null })
 
   const refresh = React.useCallback(async () => {
@@ -2923,7 +3017,11 @@ function useBoardSettings(boardSlug) {
     }
     setState((s) => ({ ...s, loading: true }))
     try {
-      const res = await cliExec(['kanban', 'boards', 'show', boardSlug, '--json'])
+      const boards = await cliExec(['kanban', 'boards', 'list', '--json'])
+      const res = (Array.isArray(boards) ? boards : []).find((b) => b && b.slug === boardSlug)
+      if (!res) {
+        throw new Error(`board '${boardSlug}' not found in boards list`)
+      }
       setState({
         settings: {
           dispatch_enabled: res.dispatch_enabled !== false,
@@ -3065,33 +3163,14 @@ function BoardSelector({ boards, active, onSelect }) {
         className: 'text-[0.6rem] uppercase tracking-wide text-(--ui-text-tertiary)',
         children: 'Boards',
       }),
-      jsxs('div', {
-        className: 'flex flex-wrap gap-1',
+      jsx('select', {
+        value: active === null ? '__all__' : active,
+        onChange: (e) => onSelect(e.target.value === '__all__' ? null : e.target.value),
+        className:
+          'w-full rounded border border-(--ui-stroke-secondary) bg-(--ui-bg-secondary) px-1.5 py-0.5 text-[0.7rem] text-(--ui-text-secondary)',
         children: [
-          jsx('button', {
-            type: 'button',
-            onClick: () => onSelect(null),
-            className: cn(
-              'rounded px-2 py-0.5 text-[0.7rem]',
-              active === null ? 'bg-(--chrome-action-hover)' : 'text-(--ui-text-tertiary)'
-            ),
-            children: 'All',
-          }),
-          ...boards.map((b) =>
-            jsx(
-              'button',
-              {
-                key: b.slug,
-                type: 'button',
-                onClick: () => onSelect(b.slug),
-                className: cn(
-                  'rounded px-2 py-0.5 text-[0.7rem]',
-                  active === b.slug ? 'bg-(--chrome-action-hover)' : 'text-(--ui-text-tertiary)'
-                ),
-                children: b.name || b.slug,
-              }
-            )
-          ),
+          jsx('option', { value: '__all__', children: 'All' }, '__all__'),
+          ...boards.map((b) => jsx('option', { value: b.slug, children: b.name || b.slug }, b.slug)),
         ],
       }),
     ],
@@ -3644,7 +3723,16 @@ function MetricsSidebar({ metrics, agentHealth, side, widthPx, dialCols }) {
 
 function DecisionHudPane() {
   const [activeProject, setActiveProject] = React.useState(null)
-  const [selectedBoard, setSelectedBoard] = React.useState(null)
+  // Initialized from + persisted to SELECTED_BOARD_STORAGE_KEY so the
+  // routed Agent Dashboard / Agent Metrics panes (useProjectDashboardScope,
+  // near the top of this file) see the same board selection — they are
+  // separate registered panes with no shared React tree, so localStorage
+  // plus a same-origin 'storage' listener is the cross-pane channel.
+  const [selectedBoard, setSelectedBoardState] = React.useState(loadSelectedBoardSlug)
+  const setSelectedBoard = React.useCallback((slug) => {
+    setSelectedBoardState(slug)
+    saveSelectedBoardSlug(slug)
+  }, [])
   const [resolving, setResolving] = React.useState(false)
   const [gridLayout, setGridLayout] = React.useState(loadGridLayout)
   const [sidebarSettings, setSidebarSettings] = React.useState(loadSidebarSettings)

@@ -3,10 +3,35 @@ import { readFileSync } from 'node:fs'
 import { fileURLToPath } from 'node:url'
 import { collectRegistrations as collectRendered, renderRegistration } from './render-harness.mjs'
 import { mount, flush, installLocalStorageStub } from './dom-harness.mjs'
+import { host } from '@hermes/plugin-sdk'
 
 installLocalStorageStub()
 
 const ROUTE_PATH = '/decision-hud/agent-metrics'
+const SELECTED_BOARD_STORAGE_KEY = 'decision-hud:selected-board'
+
+// Board-scoped auth (2026-09-14 owner decision) — same stub as
+// agent-dashboard-interface.test.mjs; see that file's comment for the full
+// rationale. This page shares useProjectDashboardScope() with the docked
+// Agent Dashboard pane, so it makes the identical two cliExec calls.
+function installKanbanScopeStub({ boardSlug, projectId, token, tokenError }) {
+  if (boardSlug) localStorage.setItem(SELECTED_BOARD_STORAGE_KEY, boardSlug)
+  const originalRequest = host.request
+  host.request = async (method, params) => {
+    if (method !== 'cli.exec') return originalRequest(method, params)
+    const argv = params?.argv || []
+    if (argv[0] === 'kanban' && argv[1] === 'boards' && argv[2] === 'list') {
+      const boards = boardSlug ? [{ slug: boardSlug, project_id: projectId || null }] : []
+      return { code: 0, output: JSON.stringify(boards) }
+    }
+    if (argv[0] === 'decision' && argv[1] === 'issue-token') {
+      if (tokenError) return { code: 0, output: JSON.stringify({ ok: false, error: tokenError }) }
+      return { code: 0, output: JSON.stringify({ ok: true, actor_token: token, project_id: projectId }) }
+    }
+    return originalRequest(method, params)
+  }
+  return () => { host.request = originalRequest }
+}
 
 function collectWithRest(rest) {
   const registrations = []
@@ -65,7 +90,13 @@ const validSnapshot = {
   ],
 }
 
-async function mountPage(response) {
+async function mountPage(response, scope = {}) {
+  const uninstall = installKanbanScopeStub({
+    boardSlug: 'default',
+    projectId: 'project-alpha',
+    token: 'actor-token-123',
+    ...scope,
+  })
   const requests = []
   const regs = await collectWithRest(async (path, options) => {
     requests.push({ path, options })
@@ -76,7 +107,7 @@ async function mountPage(response) {
   assert.ok(route, 'agent-metrics route must be available to mount')
   const mounted = mount(route.render)
   await flush()
-  return { ...mounted, requests }
+  return { ...mounted, requests, unmount: async () => { await mounted.unmount(); uninstall() } }
 }
 
 // Live state: metrics grouped by category, with an explicit uncategorized

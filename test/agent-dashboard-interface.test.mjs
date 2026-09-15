@@ -2,11 +2,41 @@ import assert from 'node:assert/strict'
 import { readFile } from 'node:fs/promises'
 import { renderRegistration, collectRegistrations as collectRendered } from './render-harness.mjs'
 import { mount, flush, installLocalStorageStub } from './dom-harness.mjs'
+import { host } from '@hermes/plugin-sdk'
 
 installLocalStorageStub()
 
 const DASHBOARD_PANE_ID = 'decision-hud:agent-dashboard'
 const DASHBOARD_PATH = '/decision-hud/agent-dashboard'
+const SELECTED_BOARD_STORAGE_KEY = 'decision-hud:selected-board'
+
+// Board-scoped auth (2026-09-14 owner decision): the dashboard's project_id
+// + actor token now come from the currently-selected Kanban board, not a
+// placeholder scope key — see useProjectDashboardScope() in plugin.js. This
+// stub answers the two `cliExec` calls that path makes: `kanban boards list
+// --json` (resolves the selected slug to a project_id) and `decision
+// issue-token --actor desktop-pane --project-id <id>` (mints the token).
+// `host` is the SAME mutable singleton plugin.js's cliExec calls
+// `host.request` on, so patching it here reaches the real code path with no
+// extra seam.
+function installKanbanScopeStub({ boardSlug, projectId, token, tokenError }) {
+  if (boardSlug) localStorage.setItem(SELECTED_BOARD_STORAGE_KEY, boardSlug)
+  const originalRequest = host.request
+  host.request = async (method, params) => {
+    if (method !== 'cli.exec') return originalRequest(method, params)
+    const argv = params?.argv || []
+    if (argv[0] === 'kanban' && argv[1] === 'boards' && argv[2] === 'list') {
+      const boards = boardSlug ? [{ slug: boardSlug, project_id: projectId || null }] : []
+      return { code: 0, output: JSON.stringify(boards) }
+    }
+    if (argv[0] === 'decision' && argv[1] === 'issue-token') {
+      if (tokenError) return { code: 0, output: JSON.stringify({ ok: false, error: tokenError }) }
+      return { code: 0, output: JSON.stringify({ ok: true, actor_token: token, project_id: projectId }) }
+    }
+    return originalRequest(method, params)
+  }
+  return () => { host.request = originalRequest }
+}
 
 function collectWithRest(rest) {
   const registrations = []
@@ -95,7 +125,13 @@ const validSnapshot = {
   pending_decisions: [],
 }
 
-async function mountDashboard(response) {
+async function mountDashboard(response, scope = {}) {
+  const uninstall = installKanbanScopeStub({
+    boardSlug: 'default',
+    projectId: 'project-alpha',
+    token: 'actor-token-123',
+    ...scope,
+  })
   const requests = []
   const regs = await collectWithRest(async (path, options) => {
     requests.push({ path, options })
@@ -106,7 +142,7 @@ async function mountDashboard(response) {
   assert.ok(pane, 'dashboard pane must be available to mount')
   const mounted = mount(pane.render)
   await flush()
-  return { ...mounted, requests }
+  return { ...mounted, requests, unmount: async () => { await mounted.unmount(); uninstall() } }
 }
 
 // The read model must expose all user-visible async states without inventing
@@ -148,5 +184,37 @@ const malformedMount = await mountDashboard({ ...validSnapshot, metrics: [{ key:
 assert.match(text(malformedMount.container), /unavailable|n\/a|invalid|no data/i)
 assert.doesNotMatch(text(malformedMount.container), /Infinity/i)
 await malformedMount.unmount()
+
+// --- Board-scoped auth acceptance (2026-09-14 owner decision) -------------
+// No board selected -> no project_id -> explicit prompt, never an unscoped
+// or failing request (this pane never issues a request without a resolved
+// project_id + token).
+{
+  const uninstall = installKanbanScopeStub({ boardSlug: null })
+  const requests = []
+  const regs = await collectWithRest(async (path, options) => { requests.push({ path, options }); return validSnapshot })
+  const pane = findPane(regs, DASHBOARD_PANE_ID)
+  const mounted = mount(pane.render)
+  await flush()
+  assert.equal(requests.length, 0, 'no board selected must never issue a read-model request')
+  assert.match(text(mounted.container), /select a board/i, 'no board selected must surface an explicit prompt')
+  await mounted.unmount()
+  uninstall()
+}
+
+// A token-mint failure (e.g. `decision issue-token --project-id` erroring)
+// must surface as an explicit error state, never a silent unscoped request.
+{
+  const uninstall = installKanbanScopeStub({ boardSlug: 'default', projectId: 'project-alpha', tokenError: 'backend unreachable' })
+  const requests = []
+  const regs = await collectWithRest(async (path, options) => { requests.push({ path, options }); return validSnapshot })
+  const pane = findPane(regs, DASHBOARD_PANE_ID)
+  const mounted = mount(pane.render)
+  await flush()
+  assert.equal(requests.length, 0, 'a token-mint failure must never fall back to an unscoped request')
+  assert.match(text(mounted.container), /backend unreachable/i, 'token-mint failure must surface the underlying error')
+  await mounted.unmount()
+  uninstall()
+}
 
 console.log('agent-dashboard-interface acceptance tests reached')
