@@ -260,103 +260,6 @@ function DashboardMessageState({ children }) {
   return jsx('div', { role: 'status', children })
 }
 
-function DashboardAgentRows({ agents }) {
-  const bounded = boundedDashboardRows(agents)
-  return jsxs('div', {
-    children: [
-      jsx('div', { className: 'mb-1 font-medium', children: 'Agents' }),
-      jsx('div', {
-        role: 'list',
-        children: bounded.rows.map((agent, index) => jsxs('div', {
-          'data-agent-row': 'true',
-          role: 'listitem',
-          children: [
-            jsx('span', { children: isDashboardRecord(agent) ? (agent.label || agent.agent_id || 'Agent') : 'Unavailable' }),
-            jsx('span', { className: 'ml-2 text-(--ui-text-tertiary)', children: isDashboardRecord(agent) ? (agent.status === 'running' ? 'Active' : (agent.status || 'Unavailable')) : 'Unavailable' }),
-          ],
-        }, isDashboardRecord(agent) ? (agent.agent_id || index) : index)),
-      }),
-      bounded.omitted > 0 ? jsx('div', { className: 'text-(--ui-text-tertiary)', children: `${bounded.omitted} agents omitted (showing ${DASHBOARD_MAX_ROWS})` }) : null,
-    ],
-  })
-}
-
-function DashboardMetricRows({ metrics }) {
-  const bounded = boundedDashboardRows(metrics)
-  return jsxs('div', {
-    children: [
-      jsx('div', { className: 'mb-1 font-medium', children: 'Metrics' }),
-      jsx('div', {
-        role: 'list',
-        children: bounded.rows.map((metric, index) => {
-          const item = displayDashboardMetric(metric)
-          return jsxs('div', {
-            'data-metric-row': 'true',
-            children: [
-              jsx('span', { children: item.label }),
-              jsx('span', { className: 'ml-2', children: item.value }),
-              item.window ? jsx('span', { className: 'ml-2 text-(--ui-text-tertiary)', children: item.window }) : null,
-            ],
-          }, index)
-        }),
-      }),
-      bounded.omitted > 0 ? jsx('div', { className: 'text-(--ui-text-tertiary)', children: `${bounded.omitted} metrics omitted (showing ${DASHBOARD_MAX_ROWS})` }) : null,
-    ],
-  })
-}
-
-function DashboardContentBody({ snapshot }) {
-  return jsxs('div', {
-    className: 'flex flex-col gap-3',
-    children: [
-      jsxs('div', { children: [jsx('span', { className: 'font-medium', children: 'Scope: ' }), jsx('span', { children: snapshot.scope.project_label })] }),
-      jsx('div', { className: 'text-(--ui-text-tertiary)', children: dashboardStatusText(snapshot) }),
-      jsx(DashboardAgentRows, { agents: snapshot.agents }),
-      jsx(DashboardMetricRows, { metrics: snapshot.metrics }),
-    ],
-  })
-}
-
-function AgentDashboard({ rest }) {
-  const [state, setState] = React.useState({ loading: true, snapshot: null, error: null })
-  const scope = useProjectDashboardScope()
-  React.useLayoutEffect(() => {
-    let active = true
-    if (scope.loading) {
-      setState({ loading: true, snapshot: null, error: null })
-      return () => { active = false }
-    }
-    if (!scope.projectId) {
-      setState({ loading: false, snapshot: null, error: scope.error || 'Select a board in Decision HUD to scope the Agent Dashboard' })
-      return () => { active = false }
-    }
-    if (!scope.token) {
-      setState({ loading: false, snapshot: null, error: scope.error || 'Unable to obtain a project-scoped actor token' })
-      return () => { active = false }
-    }
-    const query = { limit: DASHBOARD_MAX_ROWS, project_id: scope.projectId }
-    const headers = { Authorization: `Bearer ${scope.token}` }
-    rest(DASHBOARD_READ_MODEL_PATH, { method: 'GET', query, headers }).then((response) => {
-      const snapshot = validateDashboardSnapshot(response)
-      if (active) setState({ loading: false, snapshot, error: null })
-    }).catch((error) => {
-      if (active) setState({ loading: false, snapshot: null, error: String(error?.message || error) })
-    })
-    return () => { active = false }
-  }, [rest, scope.loading, scope.projectId, scope.token, scope.error])
-
-  return jsxs('section', {
-    'aria-label': 'Agent Dashboard',
-    className: 'flex h-full flex-col gap-3 p-3 text-sm',
-    children: [
-      jsx('div', { className: 'font-medium', children: 'Agent Dashboard' }),
-      state.loading ? jsx(DashboardLoadingState, {}) : state.error ? jsx(DashboardMessageState, { children: `Dashboard unavailable: ${state.error}` }) : jsx(DashboardContentBody, { snapshot: state.snapshot }),
-    ],
-  })
-}
-
-// --- End Agent Dashboard -----------------------------------------------
-
 // --- Agent Metrics (full-page route) ------------------------------------
 // Ported from the standalone agent-metrics scaffold plugin
 // (~/.hermes/desktop-plugins/agent-metrics/plugin.js) into this plugin per
@@ -4926,13 +4829,6 @@ export default {
       // "Reload desktop plugins" to take effect.
       data: paneRegistrationData(loadPanePlacement().decisionHud),
       render: () => jsx(DecisionHudPane, { rest: ctx.rest }),
-    })
-    ctx.register({
-      id: `${PLUGIN_ID}:agent-dashboard`,
-      area: 'panes',
-      title: 'Agent Dashboard',
-      data: paneRegistrationData(loadPanePlacement().agentDashboard),
-      render: () => jsx(AgentDashboard, { rest: ctx.rest }),
     })
     // Sidebar nav row: SidebarNavContribution requires a real `path` (no
     // onClick escape hatch), and this app's router treats any ROUTES_AREA
