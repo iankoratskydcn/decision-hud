@@ -4768,7 +4768,10 @@ function DecisionHudPane({ rest }) {
         host.notify({ kind: 'success', message: 'Opened a new chat with this decision' })
         return
       } catch (e) {
-        // Fall through to clipboard — see rationale above.
+        // Fall through to clipboard — see rationale above. Logged so a
+        // silent failure here is diagnosable from desktop.log instead of
+        // looking identical to "the RPC door doesn't exist on this desktop".
+        console.error('[decision-hud] handleDiscuss: session open failed, falling back to clipboard', e)
       }
       try {
         if (!navigator.clipboard || typeof navigator.clipboard.writeText !== 'function') {
