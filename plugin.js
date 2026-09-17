@@ -3505,8 +3505,15 @@ function BoardSelector({ boards, active, onSelect }) {
     children: [
       jsx(SelectTrigger, {
         'aria-label': 'Board',
-        className: 'w-40 min-w-0 shrink-0',
-        children: jsx(SelectValue, {}),
+        // w-40 alone doesn't clip: SelectValue's text has no truncate class,
+        // so a long project name (e.g. "Scholastic Context Engineering")
+        // forces the trigger button to grow past w-40 despite shrink-0 —
+        // the flex row then overflows the header and the sibling label to
+        // its left (Dispatch toggle) gets clipped by the pane's edge. min-w-0
+        // on the trigger lets it actually shrink to w-40, and truncate on
+        // the value span ellipsizes instead of forcing width.
+        className: 'w-40 min-w-0 shrink-0 overflow-hidden',
+        children: jsx(SelectValue, { className: 'block min-w-0 flex-1 truncate text-left' }),
       }),
       jsx(SelectContent, {
         children: sortedBoards.map((b) => {
