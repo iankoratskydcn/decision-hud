@@ -12,7 +12,7 @@ const source = await readFile(resolve(here, '..', 'plugin.js'), 'utf8')
 // rejected, etc.) so the action never dead-ends.
 const handleDiscussBody = source.slice(
   source.indexOf('const handleDiscuss = React.useCallback('),
-  source.indexOf('const handleDiscuss = React.useCallback(') + 3000,
+  source.indexOf('const handleDiscuss = React.useCallback(') + 3500,
 )
 
 assert.match(

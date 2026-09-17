@@ -758,12 +758,15 @@ function ConfirmButton({ disabled, resolving, onClick, children }) {
 }
 
 function DeferButton({ disabled, onClick }) {
+  // Fixed h-[1.9rem] height matches IconButton (Discuss/Dismiss) so the
+  // bottom action row's two buttons line up vertically instead of Defer's
+  // old vertical-padding-driven sizing giving it a different height.
   return jsx('button', {
     type: 'button',
     disabled,
     onClick,
     className: cn(
-      'mt-1 rounded-md px-3 py-1.5 text-[0.8rem] font-medium transition-opacity',
+      'mt-1 flex h-[1.9rem] items-center rounded-md px-3 text-[0.8rem] font-medium transition-opacity',
       'disabled:opacity-40 hover:bg-(--chrome-action-hover)'
     ),
     style: { border: '1px solid var(--ui-stroke-secondary)', color: 'var(--ui-text-secondary)' },
@@ -3049,12 +3052,14 @@ function DecisionCard({ decision, onResolve, onDefer, onDiscuss, onDismiss, reso
       // outside Body so a new CARD_RENDERERS entry gets Defer/Discuss for
       // free without having to remember to wire them per-renderer. Dismiss
       // now lives in the header row (top-right, next to urgency) instead of
-      // here; this row is right-aligned so Defer/Discuss sit flush right.
+      // here; this row is right-aligned so Discuss/Defer sit flush right.
+      // Discuss precedes Defer (owner-requested swap of the original
+      // Defer-then-Discuss order).
       jsxs('div', {
         className: 'flex items-center justify-end gap-2',
         children: [
-          jsx(DeferButton, { disabled: resolving, onClick: () => onDefer(decision.id) }),
           jsx(DiscussButton, { disabled: resolving, onClick: () => onDiscuss(decision) }),
+          jsx(DeferButton, { disabled: resolving, onClick: () => onDefer(decision.id) }),
         ],
       }),
     ],
@@ -4745,7 +4750,16 @@ function DecisionHudPane({ rest }) {
       const seedText = lines.join('\n')
       try {
         const created = await host.request('session.create', { source: 'desktop' })
-        const sessionId = created && (created.session_id || created.id)
+        // host.openSession expects the STORED session id — $selectedStoredSessionId
+        // and session-tile lookups are keyed by it, not the live runtime
+        // session_id. Passing the live id here meant openSession could never
+        // find a matching tile/route, so the surface-healthy check in
+        // waitForFocusedSessionHydration never passed and the hydration wait
+        // ran out the clock — surfacing to the user as an indefinite spinner
+        // after clicking Discuss. stored_session_id is what session.create
+        // actually returns for this purpose; session_id/id are last-resort
+        // fallbacks for an older/nonstandard backend response shape only.
+        const sessionId = created && (created.stored_session_id || created.session_id || created.id)
         if (!sessionId) throw new Error('session.create returned no session_id')
         await host.request('prompt.submit', { session_id: sessionId, text: seedText })
         if (typeof host.openSession === 'function') {

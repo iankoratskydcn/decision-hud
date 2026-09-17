@@ -32,12 +32,13 @@ assert.match(
   'DecisionCard must pass onDismiss/resolving down into CardHeader',
 )
 
-// The bottom action row now holds only Defer + Discuss, right-aligned
-// (justify-end), and must NOT render DismissButton a second time.
+// The bottom action row is right-aligned (justify-end) and must NOT render
+// DismissButton a second time. Its button order (Discuss/Defer) is pinned by
+// action-row-order-and-sizing.test.mjs, not duplicated here.
 assert.match(
   source,
-  /className:\s*'flex items-center justify-end gap-2',\s*\n\s*children:\s*\[\s*\n\s*jsx\(DeferButton,/,
-  'the bottom action row must be right-aligned (justify-end) and start with DeferButton',
+  /className:\s*'flex items-center justify-end gap-2',/,
+  'the bottom action row must be right-aligned (justify-end)',
 )
 
 const decisionCardBody = source.slice(
