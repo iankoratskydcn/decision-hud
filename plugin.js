@@ -4830,19 +4830,10 @@ export default {
       data: paneRegistrationData(loadPanePlacement().decisionHud),
       render: () => jsx(DecisionHudPane, { rest: ctx.rest }),
     })
-    // Sidebar nav row: SidebarNavContribution requires a real `path` (no
-    // onClick escape hatch), and this app's router treats any ROUTES_AREA
-    // page as content for the MAIN workspace pane, not a way to front an
-    // unrelated docked pane — a route rendering null just reveals whatever
-    // chat sits behind it (confirmed live: "click Decision HUD, see a
-    // chat"). Rendering the REAL DecisionHudPane here (an earlier attempt)
-    // was also wrong: it created a second, independent live instance with
-    // its own poll loop and its own React state, and a later screenshot
-    // caught the two instances showing visibly divergent UI (different
-    // settings-popover state) on screen simultaneously. This route renders
-    // a static, non-polling placeholder instead — see
-    // DecisionHudRoutePlaceholder above — whose one action reveals the
-    // SAME docked pane rather than duplicating it.
+    // Agent Metrics full page: same DASHBOARD_READ_MODEL_PATH read model as
+    // the (now-removed) docked Agent Dashboard pane, at full page size,
+    // reachable only by direct deep link — no sidebar-nav row, no palette
+    // command (see the palette-registration comment further below for why).
     ctx.register({
       id: 'agent-metrics-route',
       area: ROUTES_AREA,
