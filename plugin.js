@@ -24,7 +24,7 @@
  * older or hand-pushed decisions with no card_type set.
  */
 
-import { Button, cn, Codicon, haptic, host, PALETTE_AREA, ROUTES_AREA, Select, SelectContent, SelectItem, SelectTrigger, SelectValue, Separator, Switch, useValue } from '@hermes/plugin-sdk'
+import { Badge, Button, cn, Codicon, haptic, host, PALETTE_AREA, ROUTES_AREA, Select, SelectContent, SelectItem, SelectTrigger, SelectValue, Separator, Switch, useValue } from '@hermes/plugin-sdk'
 import { jsx, jsxs } from 'react/jsx-runtime'
 import * as React from 'react'
 
@@ -3269,11 +3269,65 @@ function EmergencyStopButton({ boardSlug }) {
   })
 }
 
+// Pure — no React/host dependency — sorts boards by pending-decision count
+// descending (ties broken by original relative order, i.e. a stable sort;
+// Array.prototype.sort is stable per spec since ES2019). `pendingBySlug` is
+// keyed by board slug (not project_id) since that's what BoardSelector's
+// caller already has on hand per-board; a board missing from the map (zero
+// pending decisions — `decision projects` only returns projects with >=1
+// pending row) sorts as pending: 0.
+function sortBoardsByPending(boards, pendingBySlug) {
+  if (!Array.isArray(boards)) return []
+  return boards
+    .map((b, i) => ({ b, i, pending: (pendingBySlug && pendingBySlug[b.slug]) || 0 }))
+    .sort((x, y) => (y.pending - x.pending) || (x.i - y.i))
+    .map((entry) => entry.b)
+}
+
+// Pending-decision counts per board, keyed by slug. Reuses the same
+// `hermes decision projects` CLI verb useDecisionQueue already calls (see
+// db.py list_projects() — one row per project_id with a pending count),
+// joined onto each board's own project_id so BoardSelector can index by
+// slug without knowing about decision-hud "projects" as a separate concept.
+function usePendingDecisionCounts(boards) {
+  const [state, setState] = React.useState({ pendingBySlug: {}, loading: true, error: null })
+
+  const refresh = React.useCallback(async () => {
+    try {
+      const res = await cliExec(['decision', 'projects'])
+      const projects = (res && res.projects) || []
+      const pendingByProjectId = {}
+      for (const p of projects) {
+        if (p && p.project_id) pendingByProjectId[p.project_id] = p.pending || 0
+      }
+      const pendingBySlug = {}
+      for (const b of boards) {
+        if (b && b.slug && b.project_id) {
+          pendingBySlug[b.slug] = pendingByProjectId[b.project_id] || 0
+        }
+      }
+      setState({ pendingBySlug, loading: false, error: null })
+    } catch (e) {
+      setState((s) => ({ ...s, loading: false, error: String(e.message || e) }))
+    }
+  }, [boards])
+
+  React.useEffect(() => {
+    refresh()
+    const id = setInterval(refresh, POLL_MS)
+    return () => clearInterval(id)
+  }, [refresh])
+
+  return state.pendingBySlug
+}
+
 function BoardSelector({ boards, active, onSelect }) {
-  const value = active || (boards.length > 0 ? boards[0].slug : '')
+  const pendingBySlug = usePendingDecisionCounts(boards)
+  const sortedBoards = React.useMemo(() => sortBoardsByPending(boards, pendingBySlug), [boards, pendingBySlug])
+  const value = active || (sortedBoards.length > 0 ? sortedBoards[0].slug : '')
   return jsx(Select, {
     value,
-    disabled: boards.length === 0,
+    disabled: sortedBoards.length === 0,
     onValueChange: onSelect,
     children: [
       jsx(SelectTrigger, {
@@ -3282,11 +3336,22 @@ function BoardSelector({ boards, active, onSelect }) {
         children: jsx(SelectValue, {}),
       }),
       jsx(SelectContent, {
-        children: boards.map((b) => jsx(SelectItem, {
-          key: b.slug,
-          value: b.slug,
-          children: b.name || b.slug,
-        })),
+        children: sortedBoards.map((b) => {
+          const pending = pendingBySlug[b.slug] || 0
+          return jsx(SelectItem, {
+            key: b.slug,
+            value: b.slug,
+            children: jsxs('div', {
+              className: 'flex w-full items-center justify-between gap-2',
+              children: [
+                jsx('span', { className: 'truncate', children: b.name || b.slug }),
+                pending > 0
+                  ? jsx(Badge, { variant: 'success', size: 'xs', children: String(pending) })
+                  : null,
+              ],
+            }),
+          })
+        }),
       }),
     ],
   })
