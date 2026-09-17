@@ -526,6 +526,271 @@ function parseTrailingJson(output) {
   throw new Error(`decision CLI returned no JSON value: ${output}`)
 }
 
+// --- Agent Metrics Widgets (heatmap/scatter/parallel-coords/treemap/radar/
+// sankey), backed by backend/scripts/agent_metrics_snapshot.py -----------
+// A genuinely separate surface from AgentMetricsPage above: different data
+// source (Kanban SQLite via a CLI subprocess, not the Postgres-backed
+// DASHBOARD_READ_MODEL_PATH read model), different route. Never touches
+// AgentMetricsPage/DASHBOARD_READ_MODEL_PATH. Hand-rolled inline SVG only —
+// this repo has zero runtime deps and the widgets are simple enough that a
+// charting library would be pure overhead (ponytail rung 4: stdlib/native
+// covers it — plain SVG is a native platform feature).
+const AGENT_METRICS_WIDGETS_ROUTE_PATH = '/decision-hud/agent-metrics/snapshot'
+
+function AgentMetricsWidgetsSection({ title, dataKey, children }) {
+  return jsxs('div', {
+    'data-widget': dataKey,
+    style: { border: '1px solid var(--ui-stroke-secondary)', borderRadius: '8px', padding: '12px 14px', marginBottom: '12px' },
+    children: [
+      jsx('div', { style: { fontWeight: 600, marginBottom: '8px', color: 'var(--ui-text-secondary)' }, children: title }),
+      children,
+    ],
+  })
+}
+
+function agentMetricsOutcomes(records) {
+  return [...new Set(records.map((r) => r.outcome))].sort()
+}
+
+function agentMetricsAssignees(records) {
+  return [...new Set(records.map((r) => r.assignee))].sort()
+}
+
+// Heatmap: assignee x outcome grid, cell intensity = volume. Plain DOM grid
+// (no SVG needed for a grid of colored cells).
+function AgentMetricsHeatmap({ records }) {
+  if (records.length === 0) return jsx(DashboardMessageState, { children: 'No agent metrics available' })
+  const assignees = agentMetricsAssignees(records)
+  const outcomes = agentMetricsOutcomes(records)
+  const maxVolume = Math.max(...records.map((r) => r.volume))
+  const byKey = new Map(records.map((r) => [`${r.assignee}\u0000${r.outcome}`, r]))
+  return jsx('div', {
+    style: { display: 'grid', gridTemplateColumns: `120px repeat(${outcomes.length}, 1fr)`, gap: '2px', fontSize: '11px' },
+    children: [
+      jsx('div', {}, 'corner'),
+      ...outcomes.map((o) => jsx('div', { style: { fontWeight: 600, textAlign: 'center' }, children: o }, `h-${o}`)),
+      ...assignees.flatMap((a) => [
+        jsx('div', { style: { fontWeight: 600 }, children: a }, `row-${a}`),
+        ...outcomes.map((o) => {
+          const rec = byKey.get(`${a}\u0000${o}`)
+          const intensity = rec ? rec.volume / maxVolume : 0
+          return jsx('div', {
+            'data-heatmap-cell': 'true',
+            title: rec ? `${a} / ${o}: volume ${rec.volume}` : `${a} / ${o}: no data`,
+            style: {
+              minHeight: '24px',
+              background: rec ? `rgba(80,140,255,${0.15 + intensity * 0.75})` : 'transparent',
+              border: '1px solid var(--ui-stroke-secondary)',
+              display: 'flex', alignItems: 'center', justifyContent: 'center',
+            },
+            children: rec ? String(rec.volume) : '',
+          }, `cell-${a}-${o}`)
+        }),
+      ]),
+    ],
+  })
+}
+
+// Scatter: avg_duration_s (x) vs volume (y), one point per (assignee, outcome).
+function AgentMetricsScatter({ records }) {
+  if (records.length === 0) return jsx(DashboardMessageState, { children: 'No agent metrics available' })
+  const W = 320, H = 220, PAD = 30
+  const maxDuration = Math.max(1, ...records.map((r) => r.avg_duration_s))
+  const maxVolume = Math.max(1, ...records.map((r) => r.volume))
+  const points = records.map((r) => ({
+    x: PAD + (r.avg_duration_s / maxDuration) * (W - 2 * PAD),
+    y: H - PAD - (r.volume / maxVolume) * (H - 2 * PAD),
+    label: `${r.assignee} / ${r.outcome}: ${r.avg_duration_s.toFixed(0)}s, vol ${r.volume}`,
+  }))
+  return jsxs('svg', {
+    width: W, height: H, role: 'img', 'aria-label': 'avg duration vs volume scatter plot',
+    children: [
+      jsx('line', { x1: PAD, y1: H - PAD, x2: W - PAD, y2: H - PAD, stroke: 'var(--ui-stroke-secondary)' }),
+      jsx('line', { x1: PAD, y1: PAD, x2: PAD, y2: H - PAD, stroke: 'var(--ui-stroke-secondary)' }),
+      ...points.map((p, i) => jsxs('g', { children: [jsx('circle', { cx: p.x, cy: p.y, r: 4, fill: '#508cff' }), jsx('title', { children: p.label })] }, `pt-${i}`)),
+    ],
+  })
+}
+
+// Parallel coordinates: assignee -> outcome -> volume -> avg_duration_s axes.
+function AgentMetricsParallelCoordinates({ records }) {
+  if (records.length === 0) return jsx(DashboardMessageState, { children: 'No agent metrics available' })
+  const W = 360, H = 200, PAD = 20
+  const assignees = agentMetricsAssignees(records)
+  const outcomes = agentMetricsOutcomes(records)
+  const maxVolume = Math.max(1, ...records.map((r) => r.volume))
+  const maxDuration = Math.max(1, ...records.map((r) => r.avg_duration_s))
+  const axes = ['assignee', 'outcome', 'volume', 'avg_duration_s']
+  const axisX = (i) => PAD + (i / (axes.length - 1)) * (W - 2 * PAD)
+  const yFor = (axis, r) => {
+    if (axis === 'assignee') return PAD + (assignees.indexOf(r.assignee) / Math.max(1, assignees.length - 1)) * (H - 2 * PAD)
+    if (axis === 'outcome') return PAD + (outcomes.indexOf(r.outcome) / Math.max(1, outcomes.length - 1)) * (H - 2 * PAD)
+    if (axis === 'volume') return H - PAD - (r.volume / maxVolume) * (H - 2 * PAD)
+    return H - PAD - (r.avg_duration_s / maxDuration) * (H - 2 * PAD)
+  }
+  return jsxs('svg', {
+    width: W, height: H, role: 'img', 'aria-label': 'parallel coordinates: assignee, outcome, volume, avg duration',
+    children: [
+      ...axes.map((axis, i) => jsx('line', { x1: axisX(i), y1: PAD, x2: axisX(i), y2: H - PAD, stroke: 'var(--ui-stroke-secondary)' }, `axis-${axis}`)),
+      ...records.map((r, i) => jsx('polyline', {
+        points: axes.map((axis, ai) => `${axisX(ai)},${yFor(axis, r)}`).join(' '),
+        fill: 'none', stroke: '#508cff', strokeOpacity: 0.5,
+      }, `line-${i}`)),
+    ],
+  })
+}
+
+// Treemap: nested by assignee, sized by volume. Simple single-level
+// slice-and-dice layout (rows sized proportional to each assignee's total
+// volume) — no nested-rectangle algorithm needed for one grouping level.
+function AgentMetricsTreemap({ records }) {
+  if (records.length === 0) return jsx(DashboardMessageState, { children: 'No agent metrics available' })
+  const W = 320, H = 220
+  const totals = new Map()
+  for (const r of records) totals.set(r.assignee, (totals.get(r.assignee) || 0) + r.volume)
+  const grandTotal = [...totals.values()].reduce((a, b) => a + b, 0) || 1
+  let y = 0
+  const rects = [...totals.entries()].map(([assignee, volume], i) => {
+    const h = (volume / grandTotal) * H
+    const rect = { x: 0, y, w: W, h, assignee, volume }
+    y += h
+    return rect
+  })
+  const palette = ['#508cff', '#5fd0a0', '#f0a860', '#e06880', '#a878e0', '#60c8d8']
+  return jsxs('svg', {
+    width: W, height: H, role: 'img', 'aria-label': 'volume by assignee treemap',
+    children: rects.map((r, i) => jsxs('g', {
+      children: [
+        jsx('rect', { x: r.x, y: r.y, width: r.w, height: Math.max(0, r.h - 1), fill: palette[i % palette.length], fillOpacity: 0.75 }),
+        jsx('title', { children: `${r.assignee}: volume ${r.volume}` }),
+        r.h > 14 ? jsx('text', { x: r.x + 4, y: r.y + 14, fontSize: 11, fill: '#fff', children: `${r.assignee} (${r.volume})` }) : null,
+      ],
+    }, `rect-${r.assignee}`)),
+  })
+}
+
+// Radar: per-assignee profile across outcome categories (volume per outcome,
+// normalized to that outcome's max across assignees).
+function AgentMetricsRadar({ records }) {
+  if (records.length === 0) return jsx(DashboardMessageState, { children: 'No agent metrics available' })
+  const W = 260, H = 260, CX = W / 2, CY = H / 2, R = 100
+  const outcomes = agentMetricsOutcomes(records)
+  const assignees = agentMetricsAssignees(records)
+  if (outcomes.length < 3) {
+    // A radar chart needs >=3 axes to be meaningful; fall back to an
+    // explicit note rather than drawing a degenerate 1-2-axis shape.
+    return jsx(DashboardMessageState, { children: `Not enough outcome categories for a radar chart (need >=3, have ${outcomes.length})` })
+  }
+  const maxByOutcome = new Map(outcomes.map((o) => [o, Math.max(1, ...records.filter((r) => r.outcome === o).map((r) => r.volume))]))
+  const angleFor = (i) => (i / outcomes.length) * 2 * Math.PI - Math.PI / 2
+  const palette = ['#508cff', '#5fd0a0', '#f0a860', '#e06880', '#a878e0', '#60c8d8']
+  const axisLines = outcomes.map((o, i) => {
+    const a = angleFor(i)
+    return jsx('line', { x1: CX, y1: CY, x2: CX + R * Math.cos(a), y2: CY + R * Math.sin(a), stroke: 'var(--ui-stroke-secondary)' }, `axis-${o}`)
+  })
+  const polygons = assignees.map((assignee, ai) => {
+    const pts = outcomes.map((o, i) => {
+      const rec = records.find((r) => r.assignee === assignee && r.outcome === o)
+      const ratio = rec ? rec.volume / maxByOutcome.get(o) : 0
+      const a = angleFor(i)
+      return `${CX + R * ratio * Math.cos(a)},${CY + R * ratio * Math.sin(a)}`
+    }).join(' ')
+    return jsxs('g', {
+      children: [jsx('polygon', { points: pts, fill: palette[ai % palette.length], fillOpacity: 0.2, stroke: palette[ai % palette.length] }), jsx('title', { children: assignee })],
+    }, `poly-${assignee}`)
+  })
+  return jsxs('svg', { width: W, height: H, role: 'img', 'aria-label': 'per-assignee outcome radar', children: [...axisLines, ...polygons] })
+}
+
+// Sankey: handoffs[] from -> to flow. Two-column layout (from-nodes left,
+// to-nodes right) with flow bands sized by volume — the simplest sankey
+// shape that fits this data (handoffs is already a flat from/to/volume
+// list, not a multi-stage graph).
+function AgentMetricsSankey({ handoffs }) {
+  if (handoffs.length === 0) return jsx(DashboardMessageState, { children: 'No handoffs available' })
+  const W = 360, H = 240, NODE_W = 10
+  const fromNodes = [...new Set(handoffs.map((h) => h.from))]
+  const toNodes = [...new Set(handoffs.map((h) => h.to))]
+  const totalOut = new Map(fromNodes.map((n) => [n, handoffs.filter((h) => h.from === n).reduce((s, h) => s + h.volume, 0)]))
+  const totalIn = new Map(toNodes.map((n) => [n, handoffs.filter((h) => h.to === n).reduce((s, h) => s + h.volume, 0)]))
+  const grandTotal = handoffs.reduce((s, h) => s + h.volume, 0) || 1
+  const usableH = H - 20
+  function layout(nodes, totals) {
+    let y = 10
+    const pos = new Map()
+    for (const n of nodes) {
+      const h = (totals.get(n) / grandTotal) * usableH
+      pos.set(n, { y, h })
+      y += h + 4
+    }
+    return pos
+  }
+  const fromPos = layout(fromNodes, totalOut)
+  const toPos = layout(toNodes, totalIn)
+  const fromCursor = new Map(fromNodes.map((n) => [n, fromPos.get(n).y]))
+  const toCursor = new Map(toNodes.map((n) => [n, toPos.get(n).y]))
+  const palette = ['#508cff', '#5fd0a0', '#f0a860', '#e06880', '#a878e0', '#60c8d8']
+  const bands = handoffs.map((h, i) => {
+    const bandH = (h.volume / grandTotal) * usableH
+    const y0 = fromCursor.get(h.from)
+    const y1 = toCursor.get(h.to)
+    fromCursor.set(h.from, y0 + bandH)
+    toCursor.set(h.to, y1 + bandH)
+    const x0 = NODE_W, x1 = W - NODE_W
+    const path = `M${x0},${y0} C${W / 2},${y0} ${W / 2},${y1} ${x1},${y1} L${x1},${y1 + bandH} C${W / 2},${y1 + bandH} ${W / 2},${y0 + bandH} ${x0},${y0 + bandH} Z`
+    return jsxs('g', { children: [jsx('path', { d: path, fill: palette[i % palette.length], fillOpacity: 0.45 }), jsx('title', { children: `${h.from} -> ${h.to}: ${h.volume}` })] }, `band-${h.from}-${h.to}`)
+  })
+  const fromLabels = fromNodes.map((n) => jsx('text', { x: 0, y: fromPos.get(n).y + fromPos.get(n).h / 2, fontSize: 10, children: n }, `from-label-${n}`))
+  const toLabels = toNodes.map((n) => jsx('text', { x: W, y: toPos.get(n).y + toPos.get(n).h / 2, fontSize: 10, textAnchor: 'end', children: n }, `to-label-${n}`))
+  return jsxs('svg', { width: W, height: H, role: 'img', 'aria-label': 'agent handoff sankey diagram', children: [...bands, ...fromLabels, ...toLabels] })
+}
+
+function AgentMetricsWidgetsBody({ snapshot }) {
+  const records = Array.isArray(snapshot.records) ? snapshot.records : []
+  const handoffs = Array.isArray(snapshot.handoffs) ? snapshot.handoffs : []
+  if (records.length === 0 && handoffs.length === 0) {
+    return jsx(DashboardMessageState, { children: 'No agent metrics available' })
+  }
+  return jsxs('div', {
+    children: [
+      jsx(AgentMetricsWidgetsSection, { title: 'Heatmap (assignee x outcome, volume)', dataKey: 'heatmap', children: jsx(AgentMetricsHeatmap, { records }) }),
+      jsx(AgentMetricsWidgetsSection, { title: 'Scatter (avg duration vs volume)', dataKey: 'scatter', children: jsx(AgentMetricsScatter, { records }) }),
+      jsx(AgentMetricsWidgetsSection, { title: 'Parallel Coordinates (assignee/outcome/volume/duration)', dataKey: 'parallel-coordinates', children: jsx(AgentMetricsParallelCoordinates, { records }) }),
+      jsx(AgentMetricsWidgetsSection, { title: 'Treemap (volume by assignee)', dataKey: 'treemap', children: jsx(AgentMetricsTreemap, { records }) }),
+      jsx(AgentMetricsWidgetsSection, { title: 'Radar (per-assignee outcome profile)', dataKey: 'radar', children: jsx(AgentMetricsRadar, { records }) }),
+      jsx(AgentMetricsWidgetsSection, { title: 'Sankey (handoff flow)', dataKey: 'sankey', children: jsx(AgentMetricsSankey, { handoffs }) }),
+    ],
+  })
+}
+
+function AgentMetricsWidgetsPage() {
+  const [state, setState] = React.useState({ loading: true, snapshot: null, error: null })
+  React.useLayoutEffect(() => {
+    let active = true
+    cliExec(['decision', 'agent-metrics-snapshot']).then((res) => {
+      if (!active) return
+      if (!res || res.ok === false || !Array.isArray(res.records)) {
+        setState({ loading: false, snapshot: null, error: (res && res.error) || 'agent metrics snapshot is unavailable' })
+        return
+      }
+      setState({ loading: false, snapshot: res, error: null })
+    }).catch((e) => {
+      if (active) setState({ loading: false, snapshot: null, error: String(e.message || e) })
+    })
+    return () => { active = false }
+  }, [])
+
+  return jsxs('section', {
+    'aria-label': 'Agent Metrics Widgets',
+    className: 'flex h-full flex-col gap-3 overflow-auto p-4 text-sm',
+    children: [
+      jsx('div', { className: 'font-medium', children: 'Agent Metrics Widgets' }),
+      state.loading ? jsx(DashboardLoadingState, {}) : state.error ? jsx(DashboardMessageState, { children: `Agent metrics unavailable: ${state.error}` }) : jsx(AgentMetricsWidgetsBody, { snapshot: state.snapshot }),
+    ],
+  })
+}
+// --- End Agent Metrics Widgets --------------------------------------------
+
 function useKanbanBoards() {
   // Kanban boards are a wholly separate concept from decision-hud "projects"
   // (see BoardSelector below) — this only lists them for the selector UI,
@@ -4839,6 +5104,17 @@ export default {
       area: ROUTES_AREA,
       data: { path: AGENT_METRICS_ROUTE_PATH },
       render: () => jsx(AgentMetricsPage, { rest: ctx.rest }),
+    })
+    // Separate route/surface for the agent_metrics_snapshot.py-backed
+    // widget set (heatmap/scatter/parallel-coords/treemap/radar/sankey) —
+    // different data source than AgentMetricsPage above (Kanban SQLite via
+    // cli.exec, not the Postgres DASHBOARD_READ_MODEL_PATH read model).
+    // Same reachable-by-direct-deep-link-only pattern as agent-metrics-route.
+    ctx.register({
+      id: 'agent-metrics-widgets-route',
+      area: ROUTES_AREA,
+      data: { path: AGENT_METRICS_WIDGETS_ROUTE_PATH },
+      render: () => jsx(AgentMetricsWidgetsPage, {}),
     })
     // No SIDEBAR_NAV_AREA rows anymore: both panes now default to
     // 'session-tab' placement (see DEFAULT_PANE_PLACEMENT above), which docks
