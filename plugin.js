@@ -4761,7 +4761,18 @@ function DecisionHudPane({ rest }) {
         // fallbacks for an older/nonstandard backend response shape only.
         const sessionId = created && (created.stored_session_id || created.session_id || created.id)
         if (!sessionId) throw new Error('session.create returned no session_id')
-        await host.request('prompt.submit', { session_id: sessionId, text: seedText })
+        // session.create can return before the session is registered for
+        // session-scoped RPCs — the core hits the same race and retries once
+        // on "session not found" (see use-prompt-actions/utils.ts
+        // withSessionNotFoundResume, session-gone-latch.ts). One short-delay
+        // retry here mirrors that convention instead of reinventing it.
+        try {
+          await host.request('prompt.submit', { session_id: sessionId, text: seedText })
+        } catch (submitErr) {
+          if (!/session not found/i.test(String(submitErr && submitErr.message || submitErr))) throw submitErr
+          await new Promise((resolve) => setTimeout(resolve, 300))
+          await host.request('prompt.submit', { session_id: sessionId, text: seedText })
+        }
         if (typeof host.openSession === 'function') {
           host.openSession(sessionId, { intent: 'tab' })
         }
