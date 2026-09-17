@@ -6,42 +6,40 @@ import { fileURLToPath } from 'node:url'
 const here = dirname(fileURLToPath(import.meta.url))
 const source = await readFile(resolve(here, '..', 'plugin.js'), 'utf8')
 
-// Regression guard for a BLOCKING code-review finding: the 'open-agent-metrics'
-// PALETTE_AREA command's run() called host.navigate(AGENT_METRICS_ROUTE_PATH).
-// host.navigate is used NOWHERE else in this file — every other palette/route
-// affordance reaches the user via host.revealPane(...) or a real `path` on a
-// ROUTES_AREA/SIDEBAR_NAV_AREA registration, both of which are mechanisms this
-// exact repo has already proven safe live (see commit 9d31e1a, "fix: Agent
-// Dashboard failed to load in real desktop app" — a mechanism that looked fine
-// against the mocked @hermes/plugin-sdk test harness broke in the real desktop
-// app because the harness's fake `host` doesn't prove anything about the real
-// app's host object). node_modules/@hermes/plugin-sdk's fake SDK defines
-// `navigate` as a no-op mock identical in shape to `revealPane`'s mock, so a
-// test asserting only "run() doesn't throw" would stay green either way and
-// prove nothing about which one is real.
-//
-// Fix: the full-page route is already reachable through the proven `path`
-// mechanism via the 'agent-metrics-nav' SIDEBAR_NAV_AREA registration, so the
-// redundant palette command — the only call site anywhere in this file that
-// depended on an unproven host.navigate — is removed rather than kept on a
-// capability this repo has no in-house evidence for.
+// Regression guard for a BLOCKING code-review finding: host.navigate is
+// unproven by any mechanism exercised live in this repo (see commit
+// 9d31e1a) and must never be called from plugin.js.
 assert.doesNotMatch(
   source,
   /host\.navigate\(/,
-  'host.navigate is unproven by any mechanism already exercised live in this repo (unlike host.revealPane and the ROUTES_AREA/SIDEBAR_NAV_AREA `path` fields) — do not call it from plugin.js',
+  'host.navigate is unproven by any mechanism already exercised live in this repo — do not call it from plugin.js',
 )
 
 assert.doesNotMatch(
   source,
   /id:\s*'open-agent-metrics'/,
-  "the redundant 'open-agent-metrics' palette command (whose only job was to wrap the now-removed host.navigate call) must not be registered — the route is already reachable via the proven 'agent-metrics-nav' SIDEBAR_NAV_AREA path entry",
+  "the redundant 'open-agent-metrics' palette command must not be registered",
 )
 
-// The proven mechanisms must still be present and doing the reachability work.
+// 2026-09 owner decision: SIDEBAR_NAV_AREA rows are gone entirely for these
+// panes (see pinned-pane.test.mjs) because a nav row only carries a `path`,
+// forcing every click through a ROUTES_AREA round-trip that flashed/reloaded
+// live. Decision HUD, Agent Dashboard, and Task List now default to
+// 'session-tab' placement instead — real tabs in the SESSIONS zone, same
+// mechanism the built-in Bots pane uses, with no nav row and no route
+// needed to reach them. The Agent Metrics FULL PAGE (AGENT_METRICS_ROUTE_PATH)
+// still exists as a direct-deep-link-only route with no nav row pointing at
+// it — assert that reachability, not a nav entry.
+assert.doesNotMatch(
+  source,
+  /area:\s*SIDEBAR_NAV_AREA/,
+  'no SIDEBAR_NAV_AREA row should be registered for Decision HUD / Agent Dashboard / Task List anymore — they reach the user as session-tab panes instead, never via a route-backed sidebar nav row',
+)
+
 assert.match(
   source,
-  /id:\s*'agent-metrics-nav'[\s\S]{0,200}data:\s*\{\s*path:\s*AGENT_METRICS_ROUTE_PATH/,
-  'the Agent Metrics full page must remain reachable via the proven SIDEBAR_NAV_AREA `path` mechanism',
+  /id:\s*'agent-metrics-route'[\s\S]{0,120}data:\s*\{\s*path:\s*AGENT_METRICS_ROUTE_PATH/,
+  'the Agent Metrics full page must remain reachable via its ROUTES_AREA registration (direct deep link), even with no sidebar-nav row pointing at it',
 )
 
 console.log('palette-navigate-safety regression test passed')

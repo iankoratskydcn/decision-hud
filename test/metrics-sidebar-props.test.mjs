@@ -20,7 +20,7 @@ assert.match(
 
 assert.match(
   source,
-  /jsx\(AgentHealthList,\s*\{\s*health:\s*agentHealth\s*\}\)/,
+  /jsx\(AgentHealthList,\s*\{\s*health:\s*agentHealth,\s*availableMetrics\s*\}\)/,
   'MetricsSidebar must still render AgentHealthList fed by the (now-destructured) agentHealth prop',
 )
 

@@ -24,7 +24,7 @@
  * older or hand-pushed decisions with no card_type set.
  */
 
-import { cn, haptic, host, PALETTE_AREA, ROUTES_AREA, SIDEBAR_NAV_AREA, useValue } from '@hermes/plugin-sdk'
+import { Button, cn, Codicon, haptic, host, PALETTE_AREA, ROUTES_AREA, Select, SelectContent, SelectItem, SelectTrigger, SelectValue, Separator, Switch, useValue } from '@hermes/plugin-sdk'
 import { jsx, jsxs } from 'react/jsx-runtime'
 import * as React from 'react'
 
@@ -52,6 +52,10 @@ const POLL_MS = 4000
 // flushing has no observable effect here.
 
 const DASHBOARD_MAX_ROWS = 1000
+// Reserved resolved_choice value for the Dismiss action: reuses resolve_decision()
+// (actor-token gated, same as a real answer) instead of a new delete endpoint —
+// the row and its history stay in decisions.db, just permanently off list_pending().
+const DISMISS_SENTINEL_CHOICE = '__dismissed__'
 // `ctx.rest(path)` is already scoped under `/api/plugins/<plugin-id>/...` by
 // the desktop host (plugin-id == 'decision-hud'), so a path that repeats the
 // plugin id here doubles the segment: `/decision-hud/agent-dashboard` became
@@ -106,6 +110,20 @@ function saveSelectedBoardSlug(slug) {
   }
 }
 
+// Shared by DecisionHudPane's own auto-select effect AND
+// useProjectDashboardScope below: when nothing is persisted yet, prefer
+// the board literally named/slugged "default" (matches the common
+// single-board setup, e.g. the "Default" option seen in the board
+// dropdown) over just grabbing boards[0] — a board list is not guaranteed
+// to return "default" first, and picking an arbitrary board would scope
+// the Agent Dashboard to the wrong project on a multi-board setup. Falls
+// back to the first board when there is no "default"-slugged one.
+function pickDefaultBoardSlug(boards) {
+  if (!Array.isArray(boards) || boards.length === 0) return null
+  const named = boards.find((b) => b && String(b.slug).toLowerCase() === 'default')
+  return (named || boards[0]).slug || null
+}
+
 // Shared by AgentDashboard and AgentMetricsPage: resolve the persisted
 // selected-board slug to { projectId, boardsLoading, boardsError } via the
 // same useKanbanBoards() used by DecisionHudPane, then mint (and cache, per
@@ -133,6 +151,24 @@ function useProjectDashboardScope() {
     }
     return undefined
   }, [])
+
+  // Owner request: Agent Dashboard/Metrics must work without ever visiting
+  // Decision HUD first — before this fix, no persisted selection meant an
+  // indefinite "Select a board in Decision HUD to scope the Agent
+  // Dashboard" dead end even when boards existed and one of them is
+  // "default". Auto-resolve and PERSIST the default board slug the same
+  // way DecisionHudPane's own auto-select effect does, so both panes
+  // converge on the same board and the choice is not silently re-guessed
+  // on every mount (a subsequent Decision HUD board switch still wins via
+  // the storage listener above).
+  React.useEffect(() => {
+    if (boardSlug || boardsLoading || boards.length === 0) return
+    const fallback = pickDefaultBoardSlug(boards)
+    if (fallback) {
+      setBoardSlug(fallback)
+      saveSelectedBoardSlug(fallback)
+    }
+  }, [boardSlug, boardsLoading, boards])
 
   const projectId = React.useMemo(() => {
     if (!boardSlug) return null
@@ -319,24 +355,6 @@ function AgentDashboard({ rest }) {
   })
 }
 
-function AgentDashboardRoutePlaceholder() {
-  return jsxs('div', {
-    className: 'flex h-full flex-col items-center justify-center gap-3 p-6 text-center text-sm text-(--ui-text-secondary)',
-    children: [
-      jsx('div', { key: 'title', className: 'font-medium', children: 'Agent Dashboard' }),
-      jsx('div', { key: 'body', className: 'max-w-sm text-[0.8rem] text-(--ui-text-tertiary)', children: 'Show Agent Dashboard in the docked pane.' }),
-      jsx('button', {
-        key: 'reveal',
-        type: 'button',
-        'aria-label': 'Show Agent Dashboard',
-        onClick: () => host.revealPane('decision-hud:agent-dashboard'),
-        className:
-          'rounded-md border border-(--ui-stroke-secondary) px-3 py-1.5 text-[0.8rem] font-medium hover:bg-(--chrome-action-hover)',
-        children: 'Show Agent Dashboard',
-      }),
-    ],
-  })
-}
 // --- End Agent Dashboard -----------------------------------------------
 
 // --- Agent Metrics (full-page route) ------------------------------------
@@ -742,6 +760,34 @@ function DeferButton({ disabled, onClick }) {
     style: { border: '1px solid var(--ui-stroke-secondary)', color: 'var(--ui-text-secondary)' },
     children: 'Defer',
   })
+}
+
+// IconButton: shared shape for the two icon-only card actions (Discuss,
+// Dismiss) that sit alongside DeferButton — same height/border language,
+// square instead of labeled since a codicon carries the meaning.
+function IconButton({ disabled, onClick, title, codicon, tone }) {
+  return jsx('button', {
+    type: 'button',
+    disabled,
+    onClick,
+    title,
+    'aria-label': title,
+    className: cn(
+      'mt-1 flex h-[1.9rem] w-[1.9rem] items-center justify-center rounded-md transition-opacity',
+      'disabled:opacity-40 hover:bg-(--chrome-action-hover)',
+      tone === 'danger' ? 'text-(--ui-danger,#e5484d)' : 'text-(--ui-text-secondary)'
+    ),
+    style: { border: '1px solid var(--ui-stroke-secondary)' },
+    children: jsx(Codicon, { name: codicon, size: '0.85rem' }),
+  })
+}
+
+function DiscussButton({ disabled, onClick }) {
+  return jsx(IconButton, { disabled, onClick, title: 'Discuss in chat', codicon: 'comment-discussion' })
+}
+
+function DismissButton({ disabled, onClick }) {
+  return jsx(IconButton, { disabled, onClick, title: 'Dismiss', codicon: 'close', tone: 'danger' })
 }
 
 // --- Card type components -------------------------------------------------
@@ -2974,7 +3020,7 @@ class CardErrorBoundary extends React.Component {
   }
 }
 
-function DecisionCard({ decision, onResolve, onDefer, resolving }) {
+function DecisionCard({ decision, onResolve, onDefer, onDiscuss, onDismiss, resolving }) {
   const Body = CARD_RENDERERS[decision.card_type] || DefaultChoiceCard
   const isContextReadout = decision.card_type === 'context_readout'
   return jsxs('div', {
@@ -2991,9 +3037,16 @@ function DecisionCard({ decision, onResolve, onDefer, resolving }) {
       jsx(CardQuestion, { decision }),
       jsx(CardErrorBoundary, { decisionId: decision && decision.id, children: jsx(Body, { decision, onResolve, resolving }) }),
       // Shared across every card type (present vs future) — deliberately
-      // outside Body so a new CARD_RENDERERS entry gets Defer for free
-      // without having to remember to wire it per-renderer.
-      jsx(DeferButton, { disabled: resolving, onClick: () => onDefer(decision.id) }),
+      // outside Body so a new CARD_RENDERERS entry gets Defer/Discuss/Dismiss
+      // for free without having to remember to wire them per-renderer.
+      jsxs('div', {
+        className: 'flex items-center gap-2',
+        children: [
+          jsx(DeferButton, { disabled: resolving, onClick: () => onDefer(decision.id) }),
+          jsx(DiscussButton, { disabled: resolving, onClick: () => onDiscuss(decision) }),
+          jsx(DismissButton, { disabled: resolving, onClick: () => onDismiss(decision.id) }),
+        ],
+      }),
     ],
   })
 }
@@ -3049,21 +3102,13 @@ const BOARD_SETTINGS_FIELDS = [
   { key: 'review_dispatch_enabled', verb: 'set-review-dispatch', label: 'Review-dispatch' },
 ]
 
-function ToggleSwitch({ checked, disabled, onClick }) {
-  return jsx('button', {
-    type: 'button',
-    role: 'switch',
-    'aria-checked': checked,
+function ToggleSwitch({ checked, disabled, onClick, label }) {
+  return jsx(Switch, {
+    'aria-label': label,
+    checked,
     disabled,
-    onClick,
-    className: cn(
-      'relative h-4 w-7 shrink-0 rounded-full transition-colors disabled:opacity-40'
-    ),
-    style: { background: checked ? 'var(--ui-accent)' : 'var(--ui-stroke-secondary)' },
-    children: jsx('span', {
-      className: 'absolute top-0.5 h-3 w-3 rounded-full bg-white transition-transform',
-      style: { left: checked ? '14px' : '2px' },
-    }),
+    size: 'xs',
+    onCheckedChange: onClick,
   })
 }
 
@@ -3084,9 +3129,15 @@ function BoardSettingsPanel({ boardSlug }) {
   if (!boardSlug) return null
 
   const effective = optimistic || settings
+  // Toggles reflect and let the user change per-field dispatch state UNLESS
+  // the emergency stop is active (all three off) — while stopped, disable
+  // (grey out) the toggles instead of letting them individually re-enable
+  // dispatch out from under the E-stop; releasing E-stop restores whatever
+  // combination was running before (see EmergencyStopButton), not "all on".
+  const estopped = !!effective && !effective.dispatch_enabled && !effective.auto_decompose_enabled && !effective.review_dispatch_enabled
 
   const handleToggle = async (field) => {
-    if (!effective || pending) return
+    if (!effective || pending || estopped) return
     const nextVal = !effective[field.key]
     haptic('tap')
     setPending(field.key)
@@ -3105,37 +3156,44 @@ function BoardSettingsPanel({ boardSlug }) {
     }
   }
 
+  // Layout-shift fix: switching boards refetches settings for the new
+  // board, and useBoardSettings keeps the PREVIOUS board's settings in
+  // place while that fetch is in flight (loading: true, settings: stale).
+  // The old version rendered a "…" text node ahead of the toggle row only
+  // while `loading` was true and removed it once the fetch resolved — that
+  // insert/remove on every single board switch is exactly what made the
+  // toggles visibly slide left and right (confirmed live via screenshot: a
+  // network round-trip on every switch, so the shift was reliably
+  // reproducible, not an occasional flicker). Fix: only show the "…"
+  // placeholder when there is NO settings data at all yet (first mount for
+  // a board this panel has never fetched); once `effective` exists, keep
+  // the toggle row mounted at a stable width and dim it in place while a
+  // refetch is in flight, never insert/remove a sibling node for loading.
+  const showInitialLoadingPlaceholder = loading && !effective
+
   return jsxs('div', {
-    className: 'flex flex-col gap-1.5 rounded-lg border p-2.5 text-[0.75rem]',
-    style: { border: '1px solid var(--ui-stroke-secondary)' },
+    className: 'flex min-w-0 flex-wrap items-center gap-x-4 gap-y-1 text-[0.7rem]',
     children: [
-      jsxs('div', {
-        className: 'flex items-center justify-between',
-        children: [
-          jsx('div', {
-            className: 'font-medium text-(--ui-text-secondary)',
-            children: `Board settings — ${boardSlug}`,
-          }),
-          loading ? jsx('span', { className: 'text-(--ui-text-tertiary)', children: '…' }) : null,
-        ],
-      }),
       error
-        ? jsx('div', { className: 'text-(--ui-danger,#e5484d)', children: error })
-        : null,
+        ? jsx('span', { className: 'text-(--ui-danger,#e5484d)', children: 'settings error' })
+        : showInitialLoadingPlaceholder
+          ? jsx('span', { className: 'text-(--ui-text-tertiary)', children: '…' })
+          : null,
       effective
         ? jsx('div', {
-            className: 'flex flex-col gap-1.5',
+            className: cn('flex min-w-0 flex-wrap items-center gap-x-4 gap-y-1', loading && 'opacity-50'),
             children: BOARD_SETTINGS_FIELDS.map((field) =>
               jsxs('div', {
                 key: field.key,
-                className: 'flex items-center justify-between gap-2',
+                className: 'flex shrink-0 items-center gap-1.5',
                 children: [
-                  jsx('span', { className: 'text-(--ui-text-secondary)', children: field.label }),
                   jsx(ToggleSwitch, {
                     checked: !!effective[field.key],
-                    disabled: pending !== null,
+                    disabled: pending !== null || estopped,
+                    label: field.label,
                     onClick: () => handleToggle(field),
                   }),
+                  jsx('span', { className: cn('text-(--ui-text-secondary)', estopped && 'opacity-40'), children: field.label }),
                 ],
               })
             ),
@@ -3145,74 +3203,80 @@ function BoardSettingsPanel({ boardSlug }) {
   })
 }
 
-function BoardSelector({ boards, active, onSelect }) {
-  // Board selection DOES drive the decision filter (see DecisionHudPane's
-  // selectedBoardProjectId) via the real board<->project_id cross-link
-  // wired in 2026-09-12 — this comment previously said the opposite ("UI
-  // state only, does not affect which decisions are fetched"), which was
-  // true when first written but went stale once the cross-link landed and
-  // was never corrected. Kept as a warning: a selector doing something the
-  // adjacent code disagrees about is exactly the kind of thing that reads
-  // as a UI bug (owner report: "these look like two unlabeled duplicate
-  // 'all' selectors stacked together") even though each one is individually
-  // correct — the label below is what actually fixes the confusion.
-  return jsxs('div', {
-    className: 'flex flex-col gap-1 border-b border-(--ui-stroke-secondary) pb-2',
-    children: [
-      jsx('div', {
-        className: 'text-[0.6rem] uppercase tracking-wide text-(--ui-text-tertiary)',
-        children: 'Boards',
-      }),
-      jsx('select', {
-        value: active === null ? '__all__' : active,
-        onChange: (e) => onSelect(e.target.value === '__all__' ? null : e.target.value),
-        className:
-          'w-full rounded border border-(--ui-stroke-secondary) bg-(--ui-bg-secondary) px-1.5 py-0.5 text-[0.7rem] text-(--ui-text-secondary)',
-        children: [
-          jsx('option', { value: '__all__', children: 'All' }, '__all__'),
-          ...boards.map((b) => jsx('option', { value: b.slug, children: b.name || b.slug }, b.slug)),
-        ],
-      }),
-    ],
+// EmergencyStopButton: one-click kill switch for all dispatch on a board.
+// Sits left of the settings gear in the header (see mainColumn below).
+// Off state = neutral icon button matching Settings' styling; pressed
+// (all three dispatch toggles off) = solid red so the halted state is
+// unmistakable at a glance.
+function EmergencyStopButton({ boardSlug }) {
+  const { settings } = useBoardSettings(boardSlug)
+  const [pending, setPending] = React.useState(false)
+  const preEstopRef = React.useRef(null)
+
+  if (!boardSlug || !settings) return null
+
+  const estopOn = !settings.dispatch_enabled && !settings.auto_decompose_enabled && !settings.review_dispatch_enabled
+
+  const handleClick = async () => {
+    if (pending) return
+    const confirmMsg = estopOn
+      ? `Resume dispatch for ${boardSlug}? This restores whichever toggles were on before the stop.`
+      : `Emergency stop ${boardSlug}? This halts dispatch, auto-decompose, and review-dispatch immediately.`
+    if (typeof window !== 'undefined' && window.confirm && !window.confirm(confirmMsg)) return
+    haptic('tap')
+    setPending(true)
+    const target = estopOn
+      ? (preEstopRef.current || { dispatch_enabled: true, auto_decompose_enabled: true, review_dispatch_enabled: true })
+      : { dispatch_enabled: false, auto_decompose_enabled: false, review_dispatch_enabled: false }
+    if (!estopOn) preEstopRef.current = { ...settings }
+    try {
+      await Promise.all(BOARD_SETTINGS_FIELDS.map((field) =>
+        target[field.key] !== settings[field.key]
+          ? cliExec(['kanban', 'boards', field.verb, boardSlug, target[field.key] ? 'on' : 'off'])
+          : null
+      ))
+      host.notify({ kind: estopOn ? 'success' : 'error', message: estopOn ? `Dispatch resumed for ${boardSlug}` : `EMERGENCY STOP: all dispatch halted for ${boardSlug}` })
+    } catch (e) {
+      host.notify({ kind: 'error', message: String(e.message || e) })
+    } finally {
+      setPending(false)
+    }
+  }
+
+  return jsx('button', {
+    type: 'button',
+    'aria-label': estopOn ? 'Resume dispatch' : 'Emergency stop: halt all dispatch',
+    title: estopOn ? 'Resume dispatch' : 'Emergency stop: halt all dispatch',
+    onClick: handleClick,
+    disabled: pending,
+    className: cn(
+      'flex h-6 items-center gap-1 rounded border px-2 text-[0.7rem] font-medium disabled:opacity-50',
+      estopOn
+        ? 'border-(--ui-danger,#e5484d) bg-(--ui-danger,#e5484d) text-white hover:opacity-90'
+        : 'border-(--ui-stroke-secondary) text-(--ui-text-secondary) hover:bg-(--chrome-action-hover)'
+    ),
+    children: jsx('span', { children: 'Emergency Stop' }),
   })
 }
 
-function ProjectSwitcher({ projects, active, onSelect }) {
-  return jsxs('div', {
-    className: 'flex flex-col gap-1 border-b border-(--ui-stroke-secondary) pb-2',
+function BoardSelector({ boards, active, onSelect }) {
+  const value = active || (boards.length > 0 ? boards[0].slug : '')
+  return jsx(Select, {
+    value,
+    disabled: boards.length === 0,
+    onValueChange: onSelect,
     children: [
-      jsx('div', {
-        className: 'text-[0.6rem] uppercase tracking-wide text-(--ui-text-tertiary)',
-        children: 'Projects',
+      jsx(SelectTrigger, {
+        'aria-label': 'Board',
+        className: 'w-40 min-w-0 shrink-0',
+        children: jsx(SelectValue, {}),
       }),
-      jsxs('div', {
-        className: 'flex flex-wrap gap-1',
-        children: [
-          jsx('button', {
-            type: 'button',
-            onClick: () => onSelect(null),
-            className: cn(
-              'rounded px-2 py-0.5 text-[0.7rem]',
-              active === null ? 'bg-(--chrome-action-hover)' : 'text-(--ui-text-tertiary)'
-            ),
-            children: 'all',
-          }),
-          ...projects.map((p) =>
-            jsx(
-              'button',
-              {
-                key: p.project_id,
-                type: 'button',
-                onClick: () => onSelect(p.project_id),
-                className: cn(
-                  'rounded px-2 py-0.5 text-[0.7rem]',
-                  active === p.project_id ? 'bg-(--chrome-action-hover)' : 'text-(--ui-text-tertiary)'
-                ),
-                children: `${p.slug || p.project_id} (${p.pending})`,
-              }
-            )
-          ),
-        ],
+      jsx(SelectContent, {
+        children: boards.map((b) => jsx(SelectItem, {
+          key: b.slug,
+          value: b.slug,
+          children: b.name || b.slug,
+        })),
       }),
     ],
   })
@@ -3228,6 +3292,124 @@ const SIDEBAR_WIDTH_MAX = 320
 const SIDEBAR_WIDTH_DEFAULT = 200
 const DIAL_COLS_MIN = 1
 const DIAL_COLS_MAX = 2
+
+// Pane placement: workspace panels this plugin (and the sibling task-list
+// plugin) register can live docked to the right of chat (the original
+// layout) or as a session-zone tab beside SESSIONS/BOTS (same mechanism as
+// the Kanban Bots pane) — the user's choice, not a fixed decision. Shared
+// localStorage key so task-list's plugin.js (a separate blob-loaded file,
+// no shared JS module scope) reads the same setting this Layout tab writes.
+// Registration (ctx.register in each plugin's register()) runs once at
+// plugin load, so a change here only takes effect after "Reload desktop
+// plugins" — same constraint as any other registration-time plugin config.
+const PANE_PLACEMENT_STORAGE_KEY = 'decision-hud:pane-placement'
+const DEFAULT_PANE_PLACEMENT = { decisionHud: 'session-tab', agentDashboard: 'session-tab', taskList: 'session-tab' }
+
+function loadPanePlacement() {
+  try {
+    const raw = localStorage.getItem(PANE_PLACEMENT_STORAGE_KEY)
+    if (!raw) return { ...DEFAULT_PANE_PLACEMENT }
+    const parsed = JSON.parse(raw)
+    if (!parsed || typeof parsed !== 'object') return { ...DEFAULT_PANE_PLACEMENT }
+    const pick = (v) => (v === 'session-tab' ? 'session-tab' : 'right')
+    return {
+      decisionHud: pick(parsed.decisionHud),
+      agentDashboard: pick(parsed.agentDashboard),
+      taskList: pick(parsed.taskList),
+    }
+  } catch {
+    return { ...DEFAULT_PANE_PLACEMENT }
+  }
+}
+
+function savePanePlacement(settings) {
+  try {
+    localStorage.setItem(PANE_PLACEMENT_STORAGE_KEY, JSON.stringify(settings))
+  } catch {
+    // best-effort persistence only, matches saveSidebarSettings above
+  }
+}
+
+// paneRegistrationData: turns a placement choice into the `data` object
+// ctx.register expects — 'right' is the original right-docked-column shape,
+// 'session-tab' is the Bots-pane shape (dock into the sessions zone as a
+// center tab).
+function paneRegistrationData(placement) {
+  return placement === 'session-tab'
+    ? { placement: 'left', width: '260px', collapsible: true, hideOnly: true, dock: { pane: 'sessions', pos: 'center', enforce: true } }
+    : { placement: 'right', dock: { pane: 'workspace', pos: 'right' }, minWidth: '26rem' }
+}
+
+const PANE_PLACEMENT_OPTIONS = [
+  { value: 'right', label: 'Docked (right of chat)' },
+  { value: 'session-tab', label: 'Session tab' },
+]
+
+const DISMISSED_PANES_STORAGE_KEY = 'hermes.desktop.dismissedPanes.v1'
+
+function resetDismissedPanes() {
+  try {
+    localStorage.removeItem(DISMISSED_PANES_STORAGE_KEY)
+    host.notify({ kind: 'info', message: 'Dismissed panes cleared. Restart the app (not just Reload desktop plugins) to bring them back.' })
+  } catch {
+    host.notify({ kind: 'error', message: 'Could not clear dismissed panes — localStorage unavailable.' })
+  }
+}
+
+function PanePlacementControls() {
+  const [placement, setPlacement] = React.useState(loadPanePlacement)
+
+  const update = (key, value) => {
+    const next = { ...placement, [key]: value }
+    setPlacement(next)
+    savePanePlacement(next)
+    host.notify({ kind: 'info', message: 'Reload desktop plugins to apply the new pane placement' })
+  }
+
+  const row = (key, label) =>
+    jsxs('div', {
+      key,
+      className: 'flex items-center justify-between gap-3',
+      children: [
+        jsx('span', { className: 'text-[0.75rem] text-(--ui-text-secondary)', children: label }),
+        jsxs(Select, {
+          value: placement[key],
+          onValueChange: (v) => update(key, v),
+          children: [
+            jsx(SelectTrigger, { className: 'h-7 w-44 text-[0.75rem]', children: jsx(SelectValue, {}) }),
+            jsx(SelectContent, {
+              children: PANE_PLACEMENT_OPTIONS.map((o) => jsx(SelectItem, { value: o.value, children: o.label }, o.value)),
+            }),
+          ],
+        }),
+      ],
+    })
+
+  return jsxs('div', {
+    className: 'flex flex-col gap-2',
+    children: [
+      jsx('div', { className: 'text-sm font-medium', children: 'Pane placement' }),
+      jsx('div', {
+        className: 'text-[0.75rem] text-(--ui-text-secondary)',
+        children: 'Docked pins the pane beside chat; session tab adds it next to SESSIONS/BOTS instead.',
+      }),
+      row('decisionHud', 'Decision HUD'),
+      row('agentDashboard', 'Agent Dashboard / Metrics'),
+      row('taskList', 'Task List'),
+      jsx(Button, {
+        variant: 'outline',
+        size: 'xs',
+        className: 'mt-1 w-fit',
+        onClick: resetDismissedPanes,
+        children: 'Reset dismissed panes',
+      }),
+      jsx('div', {
+        className: 'text-[0.7rem] text-(--ui-text-secondary)',
+        children: 'If a pane was ever closed by hand, it stays hidden until you clear this — placement changes alone won\u2019t bring it back.',
+      }),
+    ],
+  })
+}
 
 const DEFAULT_SIDEBAR_SETTINGS = { side: 'left', widthPx: SIDEBAR_WIDTH_DEFAULT, dialCols: 1 }
 
@@ -3409,7 +3591,7 @@ function DialGridControls({ settings, onChange }) {
 // sections") so future settings can be added as additional labeled section
 // divs — grid size, sidebar position/width, and dial grid are the sections
 // today.
-function SettingsPopover({ layout, onGridChange, sidebarSettings, onSidebarChange }) {
+function SettingsPopover({ layout, onGridChange, sidebarSettings, onSidebarChange, onOpenFullscreen }) {
   return jsx('div', {
     // the old --ui-surface-primary token used here was not a real theme token (checked against
     // apps/desktop/src/styles.css — it doesn't exist), so it resolved to
@@ -3430,7 +3612,424 @@ function SettingsPopover({ layout, onGridChange, sidebarSettings, onSidebarChang
         }),
         jsx(GridLayoutControls, { layout, onChange: onGridChange }),
         jsx(SidebarPositionControls, { settings: sidebarSettings, onChange: onSidebarChange }),
-        jsx(DialGridControls, { settings: sidebarSettings, onChange: onSidebarChange }),
+        jsx('div', { className: 'my-1 border-t border-(--ui-stroke-secondary)' }),
+        jsx('button', {
+          type: 'button',
+          onClick: onOpenFullscreen,
+          className:
+            'h-6 rounded border border-(--ui-stroke-secondary) px-2 text-[0.7rem] text-(--ui-text-secondary) hover:bg-(--chrome-action-hover)',
+          children: 'All settings…',
+        }),
+      ],
+    }),
+  })
+}
+
+
+// --- Fullscreen Settings overlay ------------------------------------------
+//
+// Opened via the gear icon's "All settings…" row (or directly, see the gear
+// onClick below). Covers the whole app window like a game's pause menu —
+// position: fixed + inset-0 + a high z-index, no portal needed since this
+// plugin's render tree already sits at the top of the pane's DOM subtree
+// and `fixed` escapes any ancestor's overflow/clipping regardless.
+// Tabs are plain client-side state; "Subagent Rules" is the first real tab,
+// wired to `hermes decision settings-get/settings-set` (subagent skill
+// injection: the pre_tool_call hook in this plugin's own __init__.py).
+function useSubagentRuleSettings() {
+  const [state, setState] = React.useState({ loading: true, enabled: true, rule: '', error: null })
+  const refresh = React.useCallback(async () => {
+    setState((s) => ({ ...s, loading: true, error: null }))
+    try {
+      const res = await cliExec(['decision', 'settings-get'])
+      const s = (res && res.settings) || {}
+      setState({
+        loading: false,
+        enabled: s.subagent_inject_enabled !== '0',
+        rule: s.subagent_inject_rule || '',
+        error: null,
+      })
+    } catch (e) {
+      setState((s) => ({ ...s, loading: false, error: String(e.message || e) }))
+    }
+  }, [])
+  React.useEffect(() => { refresh() }, [refresh])
+  const save = React.useCallback(async (key, value) => {
+    await cliExec(['decision', 'settings-set', key, value])
+  }, [])
+  return { ...state, refresh, save }
+}
+
+function useUniversalSkills() {
+  const [state, setState] = React.useState({ available: [], selected: [], loading: true, error: null })
+
+  const refresh = React.useCallback(async () => {
+    setState((s) => ({ ...s, loading: true, error: null }))
+    try {
+      const [catalog, settings] = await Promise.all([
+        host.request('skills.manage', { action: 'list' }),
+        cliExec(['decision', 'settings-get']),
+      ])
+      const grouped = catalog && catalog.skills && typeof catalog.skills === 'object' && !Array.isArray(catalog.skills) ? catalog.skills : {}
+      const available = [...new Set(Object.values(grouped).flat().filter((name) => typeof name === 'string'))].sort()
+      let selected = []
+      try {
+        const parsed = JSON.parse(settings?.settings?.subagent_inject_skills || '[]')
+        selected = Array.isArray(parsed) ? parsed.filter((name) => available.includes(name)) : []
+      } catch {
+        selected = []
+      }
+      setState({ available, selected, loading: false, error: null })
+    } catch (e) {
+      setState((s) => ({ ...s, loading: false, error: String(e.message || e) }))
+    }
+  }, [])
+
+  React.useEffect(() => { refresh() }, [refresh])
+
+  const save = React.useCallback(async (selected) => {
+    await cliExec(['decision', 'settings-set', 'subagent_inject_skills', JSON.stringify(selected)])
+    setState((s) => ({ ...s, selected }))
+  }, [])
+
+  return { ...state, refresh, save }
+}
+
+// useKanbanEscalationScope: persisted 3-way scope for which kanban_block()/
+// kanban_request_review() calls auto-push a Decision HUD card. Same
+// settings-get/settings-set bridge as useSubagentRuleSettings, so the value
+// is owner-changeable from the pane without touching skill/code files.
+function useKanbanEscalationScope() {
+  const [state, setState] = React.useState({ loading: true, scope: 'needs_input', error: null })
+  const refresh = React.useCallback(async () => {
+    setState((s) => ({ ...s, loading: true, error: null }))
+    try {
+      const res = await cliExec(['decision', 'settings-get'])
+      const s = (res && res.settings) || {}
+      setState({
+        loading: false,
+        scope: s.kanban_escalation_bridge_scope || 'needs_input',
+        error: null,
+      })
+    } catch (e) {
+      setState((s) => ({ ...s, loading: false, error: String(e.message || e) }))
+    }
+  }, [])
+  React.useEffect(() => { refresh() }, [refresh])
+  const save = React.useCallback(async (scope) => {
+    await cliExec(['decision', 'settings-set', 'kanban_escalation_bridge_scope', scope])
+    setState((s) => ({ ...s, scope }))
+  }, [])
+  return { ...state, refresh, save }
+}
+
+const KANBAN_ESCALATION_SCOPE_OPTIONS = [
+  { value: 'off', label: 'Off', description: 'Never auto-push a Decision HUD card from kanban_block/kanban_request_review.' },
+  { value: 'needs_input', label: 'Needs input only', description: "Only genuine owner decisions (kanban_block kind='needs_input'). Excludes capability/transient/dependency blocks — those are status, not decisions." },
+  { value: 'all', label: 'All blocks + reviews', description: "needs_input blocks plus every kanban_request_review handoff. Broader net, more mcq_context fallback noise from ambiguous cards." },
+]
+
+function KanbanEscalationScopeTab() {
+  const { loading, scope, error, save } = useKanbanEscalationScope()
+  const [saving, setSaving] = React.useState(false)
+
+  const handleSelect = React.useCallback(async (value) => {
+    if (value === scope) return
+    setSaving(true)
+    try {
+      await save(value)
+      host.notify({ kind: 'success', message: `Kanban escalation bridge scope set to '${value}'` })
+    } catch (e) {
+      host.notify({ kind: 'error', message: String(e.message || e) })
+    } finally {
+      setSaving(false)
+    }
+  }, [scope, save])
+
+  return jsxs('section', {
+    className: 'flex flex-col gap-2',
+    children: [
+      jsx('div', { className: 'text-sm font-medium', children: 'Kanban escalation bridge' }),
+      jsx('p', {
+        className: 'text-[0.8rem] text-(--ui-text-secondary)',
+        children:
+          'Controls which kanban_block/kanban_request_review calls auto-push a shaped Decision HUD card (via the card-type-gate classifier) instead of leaving the decision to sit as a plain board comment.',
+      }),
+      error ? jsx('div', { className: 'text-[0.75rem] text-(--ui-danger,#e5484d)', children: error }) : null,
+      jsx('div', {
+        className: 'flex flex-col gap-1',
+        children: KANBAN_ESCALATION_SCOPE_OPTIONS.map((opt) =>
+          jsxs('label', {
+            key: opt.value,
+            className: 'flex items-start gap-2 rounded border border-(--ui-stroke-secondary) p-2 text-[0.8rem]',
+            children: [
+              jsx('input', {
+                type: 'radio',
+                name: 'kanban-escalation-scope',
+                value: opt.value,
+                checked: scope === opt.value,
+                disabled: loading || saving,
+                onChange: () => handleSelect(opt.value),
+                className: 'mt-0.5',
+              }),
+              jsxs('div', {
+                className: 'flex flex-col',
+                children: [
+                  jsx('span', { className: 'font-medium', children: opt.label }),
+                  jsx('span', { className: 'text-(--ui-text-tertiary)', children: opt.description }),
+                ],
+              }),
+            ],
+          })
+        ),
+      }),
+    ],
+  })
+}
+
+function UniversalSubagentSkillsTab() {
+  const { available, selected, loading, error, save } = useUniversalSkills()
+  const [saving, setSaving] = React.useState(false)
+  const [query, setQuery] = React.useState('')
+
+  const toggle = async (name, checked) => {
+    const next = checked ? [...selected, name] : selected.filter((item) => item !== name)
+    setSaving(true)
+    try {
+      await save(next)
+    } catch (e) {
+      host.notify({ kind: 'error', message: String(e.message || e) })
+    } finally {
+      setSaving(false)
+    }
+  }
+
+  const filtered = React.useMemo(() => {
+    const q = query.trim().toLowerCase()
+    return q ? available.filter((name) => name.toLowerCase().includes(q)) : available
+  }, [available, query])
+
+  return jsxs('section', {
+    className: 'flex flex-col gap-2',
+    children: [
+      jsx('div', { className: 'text-sm font-medium', children: 'Universal subagents skill select' }),
+      jsx('div', {
+        className: 'text-[0.75rem] text-(--ui-text-secondary)',
+        children: 'Selected skills are injected into every subagent and Kanban card spawned from Hermes.',
+      }),
+      error ? jsx('div', { className: 'text-[0.75rem] text-(--ui-danger,#e5484d)', children: error }) : null,
+      !loading
+        ? jsx('input', {
+            type: 'text',
+            value: query,
+            onChange: (e) => setQuery(e.target.value),
+            placeholder: 'Search skills…',
+            'aria-label': 'Search skills',
+            className: 'w-full rounded border border-(--ui-stroke-secondary) bg-transparent px-2 py-1 text-[0.75rem]',
+          })
+        : null,
+      loading
+        ? jsx('div', { className: 'text-[0.75rem] text-(--ui-text-tertiary)', children: 'Loading skills…' })
+        : jsx('div', {
+            className: 'flex max-h-64 flex-col gap-1 overflow-y-auto rounded border border-(--ui-stroke-secondary) p-2',
+            children: filtered.length > 0
+              ? filtered.map((name) =>
+                  jsxs('label', {
+                    key: name,
+                    className: 'flex items-center gap-2 py-0.5 text-[0.75rem]',
+                    children: [
+                      jsx(Switch, {
+                        'aria-label': name,
+                        checked: selected.includes(name),
+                        disabled: saving,
+                        size: 'xs',
+                        onCheckedChange: (checked) => toggle(name, checked),
+                      }),
+                      jsx('span', { className: 'truncate', children: name }),
+                    ],
+                  })
+                )
+              : jsx('div', { className: 'text-[0.7rem] text-(--ui-text-tertiary)', children: 'No skills match' }),
+          }),
+    ],
+  })
+}
+
+function SubagentRulesTab({ availableMetrics }) {
+  const { loading, enabled, rule, error, refresh, save } = useSubagentRuleSettings()
+  const [draftRule, setDraftRule] = React.useState('')
+  const [saving, setSaving] = React.useState(false)
+  React.useEffect(() => { setDraftRule(rule) }, [rule])
+
+  const handleToggle = React.useCallback(async () => {
+    setSaving(true)
+    try {
+      await save('subagent_inject_enabled', enabled ? '0' : '1')
+      await refresh()
+      host.notify({ kind: 'success', message: enabled ? 'Subagent rule injection disabled' : 'Subagent rule injection enabled' })
+    } catch (e) {
+      host.notify({ kind: 'error', message: String(e.message || e) })
+    } finally {
+      setSaving(false)
+    }
+  }, [enabled, save, refresh])
+
+  const handleSaveRule = React.useCallback(async () => {
+    setSaving(true)
+    try {
+      await save('subagent_inject_rule', draftRule)
+      await refresh()
+      host.notify({ kind: 'success', message: 'Rule saved' })
+    } catch (e) {
+      host.notify({ kind: 'error', message: String(e.message || e) })
+    } finally {
+      setSaving(false)
+    }
+  }, [draftRule, save, refresh])
+
+  return jsxs('div', {
+    className: 'flex max-w-xl flex-col gap-4',
+    children: [
+      jsx('p', {
+        className: 'text-[0.8rem] text-(--ui-text-secondary)',
+        children:
+          'Every delegate_task and kanban_create call is intercepted before dispatch (pre_tool_call hook) and, if the child\'s context/body doesn\'t already state a standing rule, this text is appended automatically — the equivalent of Claude Code\'s old SubagentStart hook, ported to Hermes.',
+      }),
+      error ? jsx('div', { className: 'text-[0.75rem] text-(--ui-danger,#e5484d)', children: error }) : null,
+      jsxs('label', {
+        className: 'flex items-center gap-2 text-[0.85rem]',
+        children: [
+          jsx(Switch, {
+            'aria-label': 'Auto-inject into every subagent/kanban task',
+            checked: enabled,
+            disabled: loading || saving,
+            size: 'xs',
+            onCheckedChange: handleToggle,
+          }),
+          jsx('span', { children: 'Auto-inject into every subagent/kanban task' }),
+        ],
+      }),
+      jsxs('div', {
+        className: 'flex flex-col gap-1',
+        children: [
+          jsx('div', { className: 'text-[0.7rem] uppercase tracking-wide text-(--ui-text-tertiary)', children: 'Rule text' }),
+          jsx('textarea', {
+            value: draftRule,
+            disabled: loading || saving,
+            onChange: (e) => setDraftRule(e.target.value),
+            rows: 6,
+            className:
+              'w-full rounded border border-(--ui-stroke-secondary) bg-(--ui-bg-elevated) p-2 text-[0.8rem] text-(--ui-text-primary)',
+          }),
+        ],
+      }),
+      jsxs('div', {
+        className: 'flex gap-2',
+        children: [
+          jsx('button', {
+            type: 'button',
+            disabled: loading || saving || draftRule === rule,
+            onClick: handleSaveRule,
+            className:
+              'h-7 rounded border border-(--ui-accent) px-3 text-[0.8rem] text-(--ui-accent) disabled:opacity-40',
+            children: saving ? 'Saving…' : 'Save rule',
+          }),
+          jsx('button', {
+            type: 'button',
+            disabled: loading || saving || draftRule === rule,
+            onClick: () => setDraftRule(rule),
+            className:
+              'h-7 rounded border border-(--ui-stroke-secondary) px-3 text-[0.8rem] text-(--ui-text-secondary) disabled:opacity-40',
+            children: 'Revert',
+          }),
+        ],
+      }),
+      jsx(Separator, {}),
+      jsx(UniversalSubagentSkillsTab, {}),
+      jsx(Separator, {}),
+      jsx(AgentHealthBarSettings, { availableMetrics }),
+    ],
+  })
+}
+
+function SettingsFullscreen({ isOpen, onClose, layout, onGridChange, sidebarSettings, onSidebarChange, availableMetrics }) {
+  const [activeTab, setActiveTab] = React.useState('subagent-rules')
+
+  React.useEffect(() => {
+    if (!isOpen) return
+    const onKey = (e) => { if (e.key === 'Escape') onClose() }
+    window.addEventListener('keydown', onKey)
+    return () => window.removeEventListener('keydown', onKey)
+  }, [isOpen, onClose])
+
+  if (!isOpen) return null
+
+  return jsx('div', {
+    // Pane-local settings menu, contained by the main Decision HUD column.
+    className: 'absolute inset-0 z-50 flex flex-col bg-(--ui-bg-elevated)/98 backdrop-blur-sm',
+    onMouseDown: (e) => { if (e.target === e.currentTarget) onClose() },
+    children: jsxs('div', {
+      className: 'mx-auto flex h-full w-full max-w-2xl flex-col gap-5 overflow-y-auto p-6',
+      children: [
+        jsxs('div', {
+          className: 'flex items-center justify-between',
+          children: [
+            jsx('div', { className: 'text-lg font-medium', children: 'Decision HUD Settings' }),
+            jsx('button', {
+              type: 'button',
+              'aria-label': 'Close settings',
+              onClick: onClose,
+              className: 'flex h-8 w-8 items-center justify-center rounded border border-(--ui-stroke-secondary) text-(--ui-text-secondary) hover:bg-(--chrome-action-hover)',
+              children: '✕',
+            }),
+          ],
+        }),
+        jsxs('div', {
+          className: 'flex min-h-0 flex-1 gap-6',
+          children: [
+            jsxs('nav', {
+              'aria-label': 'Decision HUD settings',
+              className: 'flex w-40 shrink-0 flex-col gap-1 border-r border-(--ui-stroke-secondary) pr-3',
+              children: [
+                jsx('button', {
+                  type: 'button',
+                  onClick: () => setActiveTab('subagent-rules'),
+                  className: `rounded px-2 py-1.5 text-left text-[0.8rem] ${activeTab === 'subagent-rules' ? 'bg-(--chrome-action-hover) text-foreground' : 'text-(--ui-text-tertiary) hover:bg-(--chrome-action-hover)'}`,
+                  children: 'Subagent Rules',
+                }),
+                jsx('button', {
+                  type: 'button',
+                  onClick: () => setActiveTab('layout'),
+                  className: `rounded px-2 py-1.5 text-left text-[0.8rem] ${activeTab === 'layout' ? 'bg-(--chrome-action-hover) text-foreground' : 'text-(--ui-text-tertiary) hover:bg-(--chrome-action-hover)'}`,
+                  children: 'Layout',
+                }),
+                jsx('button', {
+                  type: 'button',
+                  onClick: () => setActiveTab('kanban-escalation'),
+                  className: `rounded px-2 py-1.5 text-left text-[0.8rem] ${activeTab === 'kanban-escalation' ? 'bg-(--chrome-action-hover) text-foreground' : 'text-(--ui-text-tertiary) hover:bg-(--chrome-action-hover)'}`,
+                  children: 'Kanban Escalation',
+                }),
+              ],
+            }),
+            jsx('div', {
+              className: 'min-w-0 flex-1 overflow-y-auto',
+              children: activeTab === 'subagent-rules'
+                ? jsx(SubagentRulesTab, { availableMetrics })
+                : activeTab === 'kanban-escalation'
+                ? jsx(KanbanEscalationScopeTab, {})
+                : jsxs('section', {
+                    className: 'flex flex-col gap-3',
+                    children: [
+                      jsx('div', { className: 'text-sm font-medium', children: 'Layout' }),
+                      jsx(GridLayoutControls, { layout, onChange: onGridChange }),
+                      jsx(SidebarPositionControls, { settings: sidebarSettings, onChange: onSidebarChange }),
+                      jsx(Separator, {}),
+                      jsx(PanePlacementControls, {}),
+                    ],
+                  }),
+            }),
+          ],
+        }),
       ],
     }),
   })
@@ -3512,7 +4111,67 @@ function useHudMetrics(decisions, boards) {
 // running-task count descending, as tie-break. See
 // decision-hub-integration/research-composite-health-score-agent4.md for the
 // future EWMA composite design — not implemented here.
-function useAgentHealth() {
+// useAgentTelemetryMetrics: real per-agent Agent Metrics telemetry (the same
+// Postgres-backed read model AgentDashboard/AgentMetricsPage render), scoped
+// to the given projectId. Metric keys are whatever the telemetry pipeline
+// has actually emitted for this project — no hardcoded vocabulary — so the
+// health-bar picker below always reflects real available metrics, never a
+// guessed list. Requires a project-scoped actor token (same
+// `hermes decision issue-token --project-id` mint AgentDashboard uses);
+// returns per-agent metric maps plus the sorted list of distinct metric keys
+// seen across all agents.
+function useAgentTelemetryMetrics(projectId, rest) {
+  const [state, setState] = React.useState({ byAgent: {}, metricKeys: [], loading: true, error: null })
+  const [token, setToken] = React.useState(null)
+
+  React.useEffect(() => {
+    let active = true
+    if (!projectId) {
+      setToken(null)
+      return () => { active = false }
+    }
+    cliExec(['decision', 'issue-token', '--actor', 'desktop-pane', '--project-id', projectId])
+      .then((res) => { if (active && res && res.ok && res.actor_token) setToken(res.actor_token) })
+      .catch(() => { if (active) setToken(null) })
+    return () => { active = false }
+  }, [projectId])
+
+  const refresh = React.useCallback(async () => {
+    if (!projectId || !token || typeof rest !== 'function') {
+      setState((s) => ({ ...s, loading: false }))
+      return
+    }
+    setState((s) => ({ ...s, loading: true, error: null }))
+    try {
+      const query = { limit: DASHBOARD_MAX_ROWS, project_id: projectId }
+      const headers = { Authorization: `Bearer ${token}` }
+      const response = await rest(DASHBOARD_READ_MODEL_PATH, { method: 'GET', query, headers })
+      const snapshot = validateDashboardSnapshot(response)
+      const byAgent = {}
+      const keySet = new Set()
+      for (const metric of snapshot.metrics) {
+        if (!isDashboardRecord(metric) || typeof metric.agent_id !== 'string' || typeof metric.key !== 'string') continue
+        if (!dashboardFiniteNumber(metric.value)) continue // bars need a numeric magnitude
+        if (!byAgent[metric.agent_id]) byAgent[metric.agent_id] = {}
+        byAgent[metric.agent_id][metric.key] = metric.value
+        keySet.add(metric.key)
+      }
+      setState({ byAgent, metricKeys: [...keySet].sort(), loading: false, error: null })
+    } catch (e) {
+      setState((s) => ({ ...s, loading: false, error: String(e.message || e) }))
+    }
+  }, [projectId, token, rest])
+
+  React.useEffect(() => {
+    refresh()
+    const id = setInterval(refresh, POLL_MS)
+    return () => clearInterval(id)
+  }, [refresh])
+
+  return { ...state, refresh }
+}
+
+function useAgentHealth(telemetryByAgent) {
   const [state, setState] = React.useState({ agents: [], loading: true, error: null })
 
   const refresh = React.useCallback(async () => {
@@ -3532,15 +4191,23 @@ function useAgentHealth() {
         // guaranteed to carry any status keys in a quiet environment.
         const fromStats = byAssignee[name] || null
         const fromRoster = (a && a.counts) || {}
-        const counts = fromStats && typeof fromStats === 'object' ? fromStats : fromRoster
-        const blocked = typeof counts.blocked === 'number' ? counts.blocked : 0
-        const running = typeof counts.running === 'number' ? counts.running : 0
+        const kanbanCounts = fromStats && typeof fromStats === 'object' ? fromStats : fromRoster
+        // Agent Metrics telemetry (real per-agent Postgres-backed values,
+        // see useAgentTelemetryMetrics) takes priority over kanban task
+        // counts for the health-bar values when telemetry has data for this
+        // agent — kanban counts remain the fallback so bars aren't just
+        // blank in a project with no telemetry pipeline wired up yet.
+        const telemetryCounts = telemetryByAgent && telemetryByAgent[name]
+        const counts = telemetryCounts && Object.keys(telemetryCounts).length > 0 ? telemetryCounts : kanbanCounts
+        const blocked = typeof kanbanCounts.blocked === 'number' ? kanbanCounts.blocked : 0
+        const running = typeof kanbanCounts.running === 'number' ? kanbanCounts.running : 0
         const hasData = Object.keys(counts).length > 0
         return {
           name,
           onDisk: Boolean(a && a.on_disk),
           blocked,
           running,
+          counts,
           hasData,
         }
       })
@@ -3558,7 +4225,7 @@ function useAgentHealth() {
     } catch (e) {
       setState((s) => ({ ...s, loading: false, error: String(e.message || e) }))
     }
-  }, [])
+  }, [telemetryByAgent])
 
   React.useEffect(() => {
     refresh()
@@ -3569,12 +4236,213 @@ function useAgentHealth() {
   return { ...state, refresh }
 }
 
-// AgentHealthList: compact rows below the dials, one per known agent,
+// Agent health bars ("HP/MP/stamina" style, in Hermes' own visual language):
+// three configurable stat bars per agent card, bound to real Agent Metrics
+// telemetry keys when telemetry is available for the current project
+// (useAgentTelemetryMetrics), falling back to kanban task-count keys
+// (done/todo/blocked/review) otherwise — see useAgentHealth above for the
+// merge. Selection is mutually exclusive across the three slots (one
+// dropdown each) plus a display checkbox per slot, persisted via the same
+// settings-get/-set backend as subagent injection (hud_settings table, key
+// `agent_health_bars`, see cli.py's _SETTINGS_KEYS default).
+const FALLBACK_AGENT_HEALTH_METRICS = [
+  { key: 'done', label: 'Done' },
+  { key: 'todo', label: 'Todo' },
+  { key: 'blocked', label: 'Blocked' },
+  { key: 'review', label: 'Review' },
+]
+const AGENT_HEALTH_BAR_COLORS = ['bg-(--ui-success,#3dd68c)', 'bg-(--ui-accent,#5b8def)', 'bg-(--ui-danger,#e5484d)']
+const DEFAULT_AGENT_HEALTH_BARS = [
+  { metric: 'done', enabled: true },
+  { metric: 'todo', enabled: true },
+  { metric: 'blocked', enabled: true },
+]
+
+function useAgentHealthBarSettings(availableMetrics) {
+  const [state, setState] = React.useState({ bars: DEFAULT_AGENT_HEALTH_BARS, loading: true, error: null })
+  const metricKeys = availableMetrics && availableMetrics.length > 0
+    ? availableMetrics.map((m) => m.key)
+    : FALLBACK_AGENT_HEALTH_METRICS.map((m) => m.key)
+
+  const refresh = React.useCallback(async () => {
+    setState((s) => ({ ...s, loading: true, error: null }))
+    try {
+      const res = await cliExec(['decision', 'settings-get'])
+      const raw = (res && res.settings && res.settings.agent_health_bars) || '[]'
+      let bars
+      try {
+        const parsed = JSON.parse(raw)
+        bars = Array.isArray(parsed) && parsed.length === 3
+          ? parsed.map((b, i) => ({
+              metric: metricKeys.includes(b?.metric) ? b.metric : metricKeys[i] || metricKeys[0],
+              enabled: Boolean(b?.enabled),
+            }))
+          : DEFAULT_AGENT_HEALTH_BARS
+      } catch {
+        bars = DEFAULT_AGENT_HEALTH_BARS
+      }
+      setState({ bars, loading: false, error: null })
+    } catch (e) {
+      setState((s) => ({ ...s, loading: false, error: String(e.message || e) }))
+    }
+  }, [metricKeys.join(',')])
+
+  React.useEffect(() => { refresh() }, [refresh])
+
+  const save = React.useCallback(async (bars) => {
+    await cliExec(['decision', 'settings-set', 'agent_health_bars', JSON.stringify(bars)])
+    setState((s) => ({ ...s, bars }))
+  }, [])
+
+  return { ...state, refresh, save }
+}
+
+// AgentHealthBarSettings: lives on the same settings page as Subagent
+// Rules/Universal skill select. Three rows, each a metric dropdown
+// (mutually exclusive — picking a metric already used elsewhere swaps it)
+// plus a "display" checkbox that toggles that bar's visibility on cards.
+// `availableMetrics` is real Agent Metrics telemetry keys for the current
+// project when telemetry exists there; otherwise the fallback kanban
+// task-count vocabulary (done/todo/blocked/review) — see useAgentHealth.
+function AgentHealthBarSettings({ availableMetrics }) {
+  const metrics = availableMetrics && availableMetrics.length > 0 ? availableMetrics : FALLBACK_AGENT_HEALTH_METRICS
+  const { bars, loading, error, save } = useAgentHealthBarSettings(metrics)
+  const [saving, setSaving] = React.useState(false)
+
+  const updateSlot = async (index, patch) => {
+    const next = bars.map((b, i) => (i === index ? { ...b, ...patch } : b))
+    if (patch.metric) {
+      // Enforce mutual exclusivity: if another slot already had this
+      // metric, swap it for the slot being replaced's old metric.
+      const displaced = bars[index].metric
+      next.forEach((b, i) => {
+        if (i !== index && b.metric === patch.metric) next[i] = { ...b, metric: displaced }
+      })
+    }
+    setSaving(true)
+    try {
+      await save(next)
+    } catch (e) {
+      host.notify({ kind: 'error', message: String(e.message || e) })
+    } finally {
+      setSaving(false)
+    }
+  }
+
+  return jsxs('section', {
+    className: 'flex flex-col gap-2',
+    children: [
+      jsx('div', { className: 'text-sm font-medium', children: 'Agent health bars' }),
+      jsx('div', {
+        className: 'text-[0.75rem] text-(--ui-text-secondary)',
+        children: availableMetrics && availableMetrics.length > 0
+          ? 'Pick up to three Agent Metrics telemetry stats to show as stat bars on each agent card.'
+          : 'No Agent Metrics telemetry yet for this board\u2019s project — showing kanban task-count stats as stat bars on each agent card.',
+      }),
+      error ? jsx('div', { className: 'text-[0.75rem] text-(--ui-danger,#e5484d)', children: error }) : null,
+      loading
+        ? jsx('div', { className: 'text-[0.75rem] text-(--ui-text-tertiary)', children: 'Loading…' })
+        : jsx('div', {
+            className: 'flex flex-col gap-2',
+            children: bars.map((bar, index) =>
+              jsxs('div', {
+                key: index,
+                className: 'flex items-center gap-3',
+                children: [
+                  jsx(Switch, {
+                    'aria-label': `Display bar ${index + 1}`,
+                    checked: bar.enabled,
+                    disabled: saving,
+                    size: 'xs',
+                    onCheckedChange: (checked) => updateSlot(index, { enabled: checked }),
+                  }),
+                  jsxs(Select, {
+                    value: bar.metric,
+                    disabled: saving,
+                    onValueChange: (value) => updateSlot(index, { metric: value }),
+                    children: [
+                      jsx(SelectTrigger, { className: 'h-7 w-32 text-[0.75rem]', children: jsx(SelectValue, {}) }),
+                      jsx(SelectContent, {
+                        children: metrics.map((m) => jsx(SelectItem, { value: m.key, children: m.label }, m.key)),
+                      }),
+                    ],
+                  }),
+                ],
+              })
+            ),
+          }),
+    ],
+  })
+}
+
+
+// AgentHealthCard: a compact per-agent "stat card" — three small bars (the
+// video-game HP/MP/stamina shape, restyled with Hermes' own tokens instead
+// of game terminology) driven by whichever kanban metrics are configured
+// in AgentHealthBarSettings. Bar length is metric-value clamped against the
+// largest value for that metric across all agents (own-relative scale —
+// there's no fixed "max tasks" ceiling to normalize against).
+// humanizeAgentName: "adversarial-reviewer" -> "Adversarial Reviewer". Purely
+// cosmetic — the raw hyphenated id is still used for keys/lookups/title attrs.
+function humanizeAgentName(name) {
+  return String(name || '')
+    .split('-')
+    .filter(Boolean)
+    .map((word) => word.charAt(0).toUpperCase() + word.slice(1))
+    .join(' ')
+}
+
+function AgentHealthCard({ agent, bars, maxByMetric }) {
+  const visibleBars = bars.filter((b) => b.enabled)
+  return jsxs('div', {
+    className: 'flex flex-col gap-1 rounded border border-(--ui-stroke-secondary) px-2 py-1.5',
+    children: [
+      jsx('div', {
+        className: 'truncate text-[0.7rem] font-medium text-(--ui-text-secondary)',
+        title: agent.name,
+        children: humanizeAgentName(agent.name),
+      }),
+      !agent.hasData
+        ? jsx('div', { className: 'text-[0.6rem] text-(--ui-text-tertiary) opacity-50', children: 'no data' })
+        : jsx('div', {
+            className: 'flex flex-col gap-0.5',
+            children: visibleBars.map((bar, i) => {
+              const value = typeof agent.counts?.[bar.metric] === 'number' ? agent.counts[bar.metric] : 0
+              const max = maxByMetric[bar.metric] || 1
+              const pct = Math.max(0, Math.min(100, (value / max) * 100))
+              return jsxs('div', {
+                key: bar.metric,
+                className: 'flex items-center gap-1.5',
+                children: [
+                  jsx('span', {
+                    className: 'w-10 shrink-0 truncate uppercase tracking-wide text-(--ui-text-tertiary)',
+                    style: { fontSize: '0.55rem', lineHeight: '0.75rem' },
+                    title: `${bar.metric}: ${value}`,
+                    children: bar.metric,
+                  }),
+                  jsx('div', {
+                    className: 'h-1.5 flex-1 overflow-hidden rounded-full bg-(--ui-stroke-secondary)',
+                    children: jsx('div', {
+                      className: `h-full rounded-full ${AGENT_HEALTH_BAR_COLORS[i % AGENT_HEALTH_BAR_COLORS.length]}`,
+                      style: { width: `${pct}%` },
+                    }),
+                  }),
+                ],
+              })
+            }),
+          }),
+    ],
+  })
+}
+
+// AgentHealthList: compact card stack below the dials, one per known agent,
 // sorted unhealthiest-first (see useAgentHealth). Honest empty/neutral
 // states instead of a fabricated ranking, matching the "n/a" / "no pending
 // rows" convention used elsewhere in this sidebar.
-function AgentHealthList({ health }) {
+function AgentHealthList({ health, availableMetrics }) {
   const { agents, loading, error } = health
+  const metrics = availableMetrics && availableMetrics.length > 0 ? availableMetrics : FALLBACK_AGENT_HEALTH_METRICS
+  const { bars } = useAgentHealthBarSettings(metrics)
 
   if (error) {
     return jsx('div', {
@@ -3596,6 +4464,10 @@ function AgentHealthList({ health }) {
   }
 
   const anyData = agents.some((a) => a.hasData)
+  const maxByMetric = {}
+  for (const bar of bars) {
+    maxByMetric[bar.metric] = Math.max(1, ...agents.map((a) => (typeof a.counts?.[bar.metric] === 'number' ? a.counts[bar.metric] : 0)))
+  }
 
   return jsxs('div', {
     className: 'flex flex-col gap-1',
@@ -3610,23 +4482,8 @@ function AgentHealthList({ health }) {
             children: 'n/a (no per-agent task data yet)',
           })
         : jsx('div', {
-            className: 'flex flex-col gap-0.5',
-            children: agents.map((a) =>
-              jsxs('div', {
-                key: a.name,
-                className: 'flex items-center justify-between gap-1 text-[0.65rem]',
-                children: [
-                  jsx('span', {
-                    className: 'truncate text-(--ui-text-secondary)',
-                    children: a.name,
-                  }),
-                  jsx('span', {
-                    className: a.hasData ? 'text-(--ui-text-tertiary)' : 'text-(--ui-text-tertiary) opacity-50',
-                    children: a.hasData ? `${a.blocked}b / ${a.running}r` : 'no data',
-                  }),
-                ],
-              })
-            ),
+            className: 'flex flex-col gap-1',
+            children: agents.map((a) => jsx(AgentHealthCard, { key: a.name, agent: a, bars, maxByMetric })),
           }),
     ],
   })
@@ -3653,76 +4510,19 @@ function MetricDial({ label, value, min, max, unit, subtitle }) {
 // implementation of that slot, not a further placeholder. Side (left/right)
 // and width are now user-configurable settings instead of a hardcoded
 // left-only w-1/4/max-w-[200px] class.
-function MetricsSidebar({ metrics, agentHealth, side, widthPx, dialCols }) {
-  const { pendingCount, highUrgencyCount, cardCoverage, boardsTotal, boardsGated, necessity } = metrics
+function MetricsSidebar({ agentHealth, side, widthPx, availableMetrics }) {
   const borderClass = side === 'right' ? 'border-l pl-3' : 'border-r pr-3'
-  return jsxs('div', {
+  return jsx('div', {
     className: `flex shrink-0 flex-col gap-3 overflow-y-auto border-(--ui-stroke-secondary) ${borderClass}`,
     style: { width: `${widthPx}px`, maxWidth: `${widthPx}px` },
-    children: [
-      jsx('div', {
-        className: 'text-[0.65rem] uppercase tracking-wide text-(--ui-text-tertiary)',
-        children: 'Metrics',
-      }),
-      // Agent health now renders ABOVE the metric dials (owner request:
-      // "swap the agent health and the metrics cards so metrics is on the
-      // bottom") — was previously the last child, after all dials.
-      jsx(AgentHealthList, { health: agentHealth }),
-      jsxs('div', {
-        className: 'grid gap-2',
-        style: { gridTemplateColumns: `repeat(${dialCols}, minmax(0, 1fr))` },
-        children: [
-          jsx(MetricDial, {
-            label: 'Pending',
-            value: pendingCount,
-            min: 0,
-            max: Math.max(5, pendingCount),
-            unit: '',
-            subtitle: `${highUrgencyCount} high-urgency`,
-          }),
-          jsx(MetricDial, {
-            label: 'Card coverage',
-            value: cardCoverage === null ? 0 : Math.round(cardCoverage * 100),
-            min: 0,
-            max: 100,
-            unit: '%',
-            subtitle: cardCoverage === null ? 'no pending rows' : 'rich cards vs plain MCQ',
-          }),
-          jsx(MetricDial, {
-            label: 'Boards gated',
-            value: boardsGated,
-            min: 0,
-            max: Math.max(1, boardsTotal),
-            unit: '',
-            subtitle: `${boardsGated} / ${boardsTotal} armed`,
-          }),
-          necessity.error
-            ? jsx('div', {
-                className: 'text-[0.65rem] text-(--ui-danger,#e5484d)',
-                children: 'necessity-rate: error',
-              })
-            : necessity.rate === null
-              ? jsx('div', {
-                  className: 'text-center text-[0.65rem] text-(--ui-text-tertiary)',
-                  children: `Escalation necessity: n/a (${necessity.marked} marked)`,
-                })
-              : jsx(MetricDial, {
-                  label: 'Escalation necessity',
-                  value: Math.round(necessity.rate * 100),
-                  min: 0,
-                  max: 100,
-                  unit: '%',
-                  subtitle: `n=${necessity.marked}`,
-                }),
-        ],
-      }),
-    ],
+    children: jsx(AgentHealthList, { health: agentHealth, availableMetrics }),
   })
 }
 
 
-function DecisionHudPane() {
-  const [activeProject, setActiveProject] = React.useState(null)
+function DecisionHudPane({ rest }) {
+  // The selected board is the sole project scope: boards and projects are
+  // intentionally one-to-one.
   // Initialized from + persisted to SELECTED_BOARD_STORAGE_KEY so the
   // routed Agent Dashboard / Agent Metrics panes (useProjectDashboardScope,
   // near the top of this file) see the same board selection — they are
@@ -3736,28 +4536,36 @@ function DecisionHudPane() {
   const [resolving, setResolving] = React.useState(false)
   const [gridLayout, setGridLayout] = React.useState(loadGridLayout)
   const [sidebarSettings, setSidebarSettings] = React.useState(loadSidebarSettings)
-  const [settingsOpen, setSettingsOpen] = React.useState(false)
+  const [settingsFullscreenOpen, setSettingsFullscreenOpen] = React.useState(false)
   const { boards, error: boardsError } = useKanbanBoards()
 
-  // The real Kanban<->Decision-HUD cross-link (previously TODO/UI-state-only):
-  // both `board.project_id` (hermes-agent core, fixed 2026-09-12 — bind-board
-  // now writes it symmetrically) and `decisions.project_id` (this plugin's v6
-  // migration, same date) are keys into the SAME projects.db row, so picking a
-  // board can drive the decision filter directly instead of being two
-  // unrelated selectors that happened to sit next to each other. Board
-  // selection wins over the manual ProjectSwitcher when both are set — it's
-  // the more specific choice (a project can exist with no bound board, but a
-  // bound board always implies exactly one project).
-  const selectedBoardProjectId = React.useMemo(() => {
-    if (!selectedBoard) return null
-    const board = boards.find((b) => b && b.slug === selectedBoard)
-    return board ? board.project_id || null : null
-  }, [boards, selectedBoard])
-  const effectiveProjectId = selectedBoardProjectId || activeProject
+  React.useEffect(() => {
+    if (!selectedBoard && boards.length > 0) {
+      // Same "default"-slug preference as useProjectDashboardScope, so
+      // Decision HUD and Agent Dashboard/Metrics converge on the same
+      // auto-picked board instead of racing to different boards[0]s.
+      const fallback = pickDefaultBoardSlug(boards)
+      if (fallback) setSelectedBoard(fallback)
+    }
+  }, [boards, selectedBoard, setSelectedBoard])
 
-  const { decisions, projects, loading, error, refresh } = useDecisionQueue(effectiveProjectId)
-  const metrics = useHudMetrics(decisions, boards)
-  const agentHealth = useAgentHealth()
+  const boardForControls = selectedBoard || pickDefaultBoardSlug(boards)
+
+  // Board/project scope is one-to-one: the selected board resolves directly
+  // to the single project whose decisions should be shown.
+  const selectedBoardProjectId = React.useMemo(() => {
+    if (!boardForControls) return null
+    const board = boards.find((b) => b && b.slug === boardForControls)
+    return board ? board.project_id || null : null
+  }, [boards, boardForControls])
+
+  const { decisions, loading, error, refresh } = useDecisionQueue(selectedBoardProjectId)
+  const telemetry = useAgentTelemetryMetrics(selectedBoardProjectId, rest)
+  const agentHealth = useAgentHealth(telemetry.byAgent)
+  const availableMetrics = React.useMemo(
+    () => telemetry.metricKeys.map((key) => ({ key, label: key })),
+    [telemetry.metricKeys]
+  )
 
   const handleGridChange = React.useCallback((next) => {
     setGridLayout(next)
@@ -3810,6 +4618,63 @@ function DecisionHudPane() {
     [refresh]
   )
 
+  const handleDismiss = React.useCallback(
+    async (id) => {
+      // Dismiss = resolve with a reserved sentinel choice, reusing the same
+      // resolve_decision() path (and its actor-token gate) rather than a new
+      // delete endpoint — the row and its history stay in the DB, just
+      // permanently off the pending queue, unlike Defer which resurfaces.
+      if (!window.confirm('Dismiss this decision? It will be marked resolved and removed from the queue.')) {
+        return
+      }
+      haptic('tap')
+      setResolving(true)
+      try {
+        const actorToken = await getActorToken()
+        await cliExec(['decision', 'resolve', id, DISMISS_SENTINEL_CHOICE, '--actor-token', actorToken])
+        host.notify({ kind: 'success', message: 'Dismissed' })
+        await refresh()
+      } catch (e) {
+        host.notify({ kind: 'error', message: String(e.message || e) })
+      } finally {
+        setResolving(false)
+      }
+    },
+    [refresh]
+  )
+
+  const handleDiscuss = React.useCallback(
+    async (decision) => {
+      // Compose a prompt so the user can talk this decision through at
+      // length in their own chat, rather than resolving from the card's
+      // bounded choice list. NOT host.navigate (a sibling review flagged it
+      // as unproven by any live mechanism in this repo and banned it — see
+      // palette-navigate-safety.test.mjs) and NOT session.create + navigate
+      // (same problem). Copy-to-clipboard via the standard Web Clipboard
+      // API needs no unproven Hermes-specific door: the user pastes into
+      // whichever chat they want, no new session forced.
+      haptic('tap')
+      try {
+        const lines = [`Let's discuss this decision at length:\n\n**${decision.question || '(no question text)'}**`]
+        if (Array.isArray(decision.choices) && decision.choices.length > 0) {
+          lines.push(`\nChoices on the card: ${decision.choices.join(', ')}`)
+        }
+        if (decision.project_slug || decision.project_id) {
+          lines.push(`\nProject: ${decision.project_slug || decision.project_id}`)
+        }
+        const seedText = lines.join('\n')
+        if (!navigator.clipboard || typeof navigator.clipboard.writeText !== 'function') {
+          throw new Error('Clipboard API unavailable in this environment')
+        }
+        await navigator.clipboard.writeText(seedText)
+        host.notify({ kind: 'success', message: 'Copied — paste into a chat to discuss' })
+      } catch (e) {
+        host.notify({ kind: 'error', message: String(e.message || e) })
+      }
+    },
+    []
+  )
+
   // Defensive fallback: sidebarSettings comes from useState(loadSidebarSettings)
   // and every setter path also goes through loadSidebarSettings-shaped
   // objects, so this should always be a real object — but this is the exact
@@ -3820,46 +4685,44 @@ function DecisionHudPane() {
   // keeps this component from being a second place that bug can hide.
   const safeSidebarSettings = sidebarSettings && typeof sidebarSettings === 'object' ? sidebarSettings : DEFAULT_SIDEBAR_SETTINGS
   const metricsSidebar = jsx(MetricsSidebar, {
-    metrics, agentHealth,
-    side: safeSidebarSettings.side, widthPx: safeSidebarSettings.widthPx, dialCols: safeSidebarSettings.dialCols,
+    agentHealth,
+    side: safeSidebarSettings.side, widthPx: safeSidebarSettings.widthPx,
+    availableMetrics,
   })
   const mainColumn = jsxs('div', {
-    className: 'flex min-w-0 flex-1 flex-col gap-3',
+    className: 'relative flex min-w-0 flex-1 flex-col gap-3',
     children: [
       jsxs('div', {
-        className: 'relative flex items-center justify-between',
+        className: 'relative flex flex-wrap items-center gap-x-2 gap-y-1',
         children: [
-          jsx('div', { className: 'font-medium', children: 'Decision HUD' }),
           jsxs('div', {
-            className: 'flex items-center gap-2',
+            className: 'flex min-w-0 flex-wrap items-center gap-2',
             children: [
-              jsx('div', {
-                className: 'text-[0.7rem] text-(--ui-text-tertiary)',
-                children: loading ? 'refreshing…' : `${decisions.length} pending`,
-              }),
+              jsx('div', { className: 'shrink-0 font-medium', children: 'Decision HUD' }),
+              jsx(BoardSettingsPanel, { boardSlug: boardForControls }),
+              jsx(BoardSelector, { boards, active: boardForControls, onSelect: setSelectedBoard }),
+            ],
+          }),
+          jsx('div', {
+            className: 'ml-auto flex shrink-0 items-center gap-2',
+            children: [
+              jsx(EmergencyStopButton, { boardSlug: boardForControls }),
               jsx('button', {
                 type: 'button',
                 'aria-label': 'Settings',
-                onClick: () => setSettingsOpen((v) => !v),
+                onClick: () => setSettingsFullscreenOpen(true),
                 // the old --ui-surface-secondary hover token used here was also a non-existent
                 // token (same class of bug as SettingsPopover's background
                 // above) — --chrome-action-hover is the real hover token
                 // this app uses on icon buttons everywhere else.
                 className:
                   'flex h-6 w-6 items-center justify-center rounded border border-(--ui-stroke-secondary) text-[0.8rem] text-(--ui-text-secondary) hover:bg-(--chrome-action-hover)',
-                children: '⚙',
+                children: jsx(Codicon, { name: 'settings-gear', size: '0.8rem' }),
               }),
             ],
           }),
-          settingsOpen && jsx(SettingsPopover, {
-            layout: gridLayout, onGridChange: handleGridChange,
-            sidebarSettings, onSidebarChange: handleSidebarSettingsChange,
-          }),
         ],
       }),
-      jsx(BoardSelector, { boards, active: selectedBoard, onSelect: setSelectedBoard }),
-      jsx(BoardSettingsPanel, { boardSlug: selectedBoard }),
-      jsx(ProjectSwitcher, { projects, active: effectiveProjectId, onSelect: (pid) => { setSelectedBoard(null); setActiveProject(pid) } }),
       boardsError
         ? jsx('div', { className: 'text-[0.75rem] text-(--ui-danger,#e5484d)', children: boardsError })
         : null,
@@ -3889,15 +4752,22 @@ function DecisionHudPane() {
                 children: decisions
                   .slice(0, gridLayout.cols * gridLayout.rows)
                   .map((d) =>
-                    jsx(DecisionCard, { key: d.id, decision: d, onResolve: handleResolve, onDefer: handleDefer, resolving })
+                    jsx(DecisionCard, { key: d.id, decision: d, onResolve: handleResolve, onDefer: handleDefer, onDiscuss: handleDiscuss, onDismiss: handleDismiss, resolving })
                   ),
               }),
+      }),
+      jsx(SettingsFullscreen, {
+        isOpen: settingsFullscreenOpen,
+        onClose: () => setSettingsFullscreenOpen(false),
+        layout: gridLayout, onGridChange: handleGridChange,
+        sidebarSettings, onSidebarChange: handleSidebarSettingsChange,
+        availableMetrics,
       }),
     ],
   })
 
-  return jsxs('div', {
-    className: 'flex h-full gap-3 p-3 text-sm',
+  return jsx('div', {
+    className: 'relative flex h-full gap-3 p-3 text-sm',
     // Sidebar renders on whichever side the user picked in settings — left
     // is the historical default (sidebar first in the children array),
     // right means the main column renders first instead.
@@ -3908,47 +4778,6 @@ function DecisionHudPane() {
 }
 
 const PANE_ID = `${PLUGIN_ID}:pane`
-
-// DecisionHudRoutePlaceholder: the /decision-hud route's content. NOT a
-// second live DecisionHudPane — screenshot bug confirmed the previous
-// "run a second full instance, it's cheap and self-resolving" approach was
-// wrong: the docked pane (always mounted, right side) and the routed page
-// (main content, when navigated to) rendered as two INDEPENDENT React
-// trees with their own state (settingsOpen, gridLayout, etc.) and their own
-// POLL_MS poll loop — one screenshot showed the gear-icon settings popover
-// open in one instance and a completely different inline grid control
-// layout in the other, on screen at the same time, because they really are
-// two unrelated component instances, not one UI reacting twice.
-//
-// This is a static, non-polling placeholder instead: it renders no data,
-// holds no settings state, and its one interactive element reveals the
-// REAL docked pane (host.revealPane(PANE_ID)) rather than duplicating it.
-// The sidebar nav row still needs a route to point at (SidebarNavContribution
-// requires a path, no onClick escape hatch — see the plugin's register()),
-// so this is what makes clicking that row land somewhere coherent without
-// resurrecting either of the two prior bugs (a reveal-effect stub showed a
-// stray chat; a second live pane showed divergent duplicate state).
-function DecisionHudRoutePlaceholder() {
-  return jsx('div', {
-    className: 'flex h-full flex-col items-center justify-center gap-3 p-6 text-center text-sm text-(--ui-text-secondary)',
-    children: [
-      jsx('div', { key: 'title', className: 'font-medium', children: 'Decision HUD lives in the docked pane' }),
-      jsx('div', {
-        key: 'body',
-        className: 'max-w-sm text-[0.8rem] text-(--ui-text-tertiary)',
-        children: 'It stays pinned beside your chats so it never gets replaced by switching sessions. Use the button below to bring it forward.',
-      }),
-      jsx('button', {
-        key: 'reveal',
-        type: 'button',
-        onClick: () => host.revealPane(PANE_ID),
-        className:
-          'rounded-md border border-(--ui-stroke-secondary) px-3 py-1.5 text-[0.8rem] font-medium hover:bg-(--chrome-action-hover)',
-        children: 'Show Decision HUD',
-      }),
-    ],
-  })
-}
 
 export default {
   id: PLUGIN_ID,
@@ -3966,22 +4795,21 @@ export default {
       id: PANE_ID,
       area: 'panes',
       title: 'Decision HUD',
-      data: {
-        placement: 'right',
-        dock: { pane: 'workspace', pos: 'right' },
-        minWidth: '26rem',
-      },
-      render: () => jsx(DecisionHudPane, {}),
+      // Placement is now a user setting (Layout tab -> Pane placement),
+      // not a fixed choice: 'right' is the original docked column, while
+      // 'session-tab' docks into the SESSIONS zone as a center tab, same
+      // pattern as the Kanban Bots pane
+      // (apps/desktop/src/plugins/hermes-bots/plugin.tsx). Read once at
+      // registration time — like any plugin config, a change here needs
+      // "Reload desktop plugins" to take effect.
+      data: paneRegistrationData(loadPanePlacement().decisionHud),
+      render: () => jsx(DecisionHudPane, { rest: ctx.rest }),
     })
     ctx.register({
       id: `${PLUGIN_ID}:agent-dashboard`,
       area: 'panes',
       title: 'Agent Dashboard',
-      data: {
-        placement: 'right',
-        dock: { pane: 'workspace', pos: 'right' },
-        minWidth: '26rem',
-      },
+      data: paneRegistrationData(loadPanePlacement().agentDashboard),
       render: () => jsx(AgentDashboard, { rest: ctx.rest }),
     })
     // Sidebar nav row: SidebarNavContribution requires a real `path` (no
@@ -3998,35 +4826,24 @@ export default {
     // DecisionHudRoutePlaceholder above — whose one action reveals the
     // SAME docked pane rather than duplicating it.
     ctx.register({
-      id: 'page',
-      area: ROUTES_AREA,
-      data: { path: '/decision-hud' },
-      render: () => jsx(DecisionHudRoutePlaceholder, {}),
-    })
-    ctx.register({
-      id: 'agent-dashboard-route',
-      area: ROUTES_AREA,
-      data: { path: '/decision-hud/agent-dashboard' },
-      render: () => jsx(AgentDashboardRoutePlaceholder, {}),
-    })
-    ctx.register({
       id: 'agent-metrics-route',
       area: ROUTES_AREA,
       data: { path: AGENT_METRICS_ROUTE_PATH },
       render: () => jsx(AgentMetricsPage, { rest: ctx.rest }),
     })
-    ctx.register({
-      id: 'nav',
-      area: SIDEBAR_NAV_AREA,
-      order: 55,
-      data: { path: '/decision-hud', label: 'Decision HUD', codicon: 'checklist' },
-    })
-    ctx.register({
-      id: 'agent-metrics-nav',
-      area: SIDEBAR_NAV_AREA,
-      order: 56,
-      data: { path: AGENT_METRICS_ROUTE_PATH, label: 'Agent Metrics', codicon: 'graph' },
-    })
+    // No SIDEBAR_NAV_AREA rows anymore: both panes now default to
+    // 'session-tab' placement (see DEFAULT_PANE_PLACEMENT above), which docks
+    // them as real tabs in the SESSIONS zone tab strip — the same mechanism
+    // the built-in Bots pane uses (apps/desktop/src/plugins/hermes-bots/
+    // plugin.tsx registers `panes` + `dock: { pane: 'sessions', ... }` with NO
+    // sidebar-nav row and NO route at all). A SidebarNavContribution only
+    // takes a `path` (no onClick), so it always routes through ROUTES_AREA
+    // first; even the reveal-and-redirect placeholder pattern (navigate away,
+    // then host.revealPane + history.back()) produced a visible flash/reload
+    // on every click — confirmed live, this is the bug this fix removes.
+    // Clicking the tab strip entry switches tabs directly; no navigation
+    // event, no placeholder page, no flash. AGENT_METRICS_ROUTE_PATH's full
+    // page (registered just above) stays reachable by direct deep link only.
     // Palette command to re-surface the docked pane specifically (e.g. after
     // closing/minimizing its tab) without going through the route at all.
     ctx.register({

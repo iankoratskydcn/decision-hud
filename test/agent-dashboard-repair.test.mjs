@@ -1,23 +1,22 @@
 import assert from 'node:assert/strict'
 import { collectRegistrations } from './render-harness.mjs'
-import { renderRegistration } from './render-harness.mjs'
 
+// The old /decision-hud/agent-dashboard reveal-and-redirect placeholder
+// route no longer exists (2026-09 owner decision — see pinned-pane.test.mjs):
+// Agent Dashboard now defaults to 'session-tab' placement, docking as a real
+// SESSIONS-zone tab with no route needed to reach it.
 const ROUTE_PATH = '/decision-hud/agent-dashboard'
 const registrations = collectRegistrations()
 const route = registrations.find((registration) => (
   registration.area === 'routes' && registration.data?.path === ROUTE_PATH
 ))
 
-assert.ok(route, `expected dashboard route at ${ROUTE_PATH}`)
-const rendered = renderRegistration(route)
-assert.equal(rendered.error, null, 'dashboard route must render without throwing')
-assert.match(rendered.html, /Agent Dashboard/i)
+assert.equal(route, undefined, `${ROUTE_PATH} route must no longer exist — Agent Dashboard is a session-tab pane now`)
 
-// The route is a placeholder rather than a second live dashboard tree, but it
-// must still give keyboard and mouse users a native actionable reveal control.
-assert.match(rendered.html, /<button\b/i, 'route must contain a native button')
-assert.match(rendered.html, /Show Agent Dashboard/i)
-assert.match(rendered.html, /type="button"/i)
-assert.match(rendered.html, /aria-label="Show Agent Dashboard"/i)
+const pane = registrations.find((registration) => (
+  registration.area === 'panes' && registration.id === 'decision-hud:agent-dashboard'
+))
+assert.ok(pane, 'the Agent Dashboard pane registration must still exist')
+assert.deepEqual(pane.data?.dock, { pane: 'sessions', pos: 'center', enforce: true }, 'Agent Dashboard must default to session-tab placement')
 
-console.log('agent-dashboard-repair UI acceptance test reached')
+console.log('agent-dashboard-repair (session-tab, no route) regression test passed')
