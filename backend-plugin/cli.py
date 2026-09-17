@@ -514,6 +514,12 @@ _SETTINGS_KEYS = {
     # from the pane, not hardcoded, since scope needs differ by how much
     # blocked/review traffic a board is generating.
     "kanban_escalation_bridge_scope": "needs_input",
+    # Profiles the kanban_profile_hooks_sync.py cron script must NEVER patch
+    # hooks into (JSON array of profile names). Owner-editable from the pane
+    # so an intentionally-hookless profile (e.g. one that must never trigger
+    # escalation, or a throwaway test profile) doesn't get its config.yaml
+    # rewritten on the next 30-minute tick.
+    "kanban_profile_hooks_exempt": "[]",
     "agent_health_bars": json.dumps([
         {"metric": "done", "enabled": True},
         {"metric": "todo", "enabled": True},

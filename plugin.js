@@ -3977,6 +3977,87 @@ const KANBAN_ESCALATION_SCOPE_OPTIONS = [
   { value: 'all', label: 'All blocks + reviews', description: "needs_input blocks plus every kanban_request_review handoff. Broader net, more mcq_context fallback noise from ambiguous cards." },
 ]
 
+// useKanbanProfileHooksExempt: JSON-array-of-names setting controlling which
+// profiles kanban_profile_hooks_sync.py (cron, every 30m) must never patch
+// hooks into. Same settings-get/settings-set bridge; the sync script reads
+// it directly via `hermes decision settings-get`, so this tab is the only
+// UI surface needed — no new CLI/RPC.
+function useKanbanProfileHooksExempt() {
+  const [state, setState] = React.useState({ loading: true, names: [], error: null })
+  const refresh = React.useCallback(async () => {
+    setState((s) => ({ ...s, loading: true, error: null }))
+    try {
+      const res = await cliExec(['decision', 'settings-get'])
+      const s = (res && res.settings) || {}
+      let names = []
+      try {
+        const parsed = JSON.parse(s.kanban_profile_hooks_exempt || '[]')
+        names = Array.isArray(parsed) ? parsed.filter((n) => typeof n === 'string') : []
+      } catch {
+        names = []
+      }
+      setState({ loading: false, names, error: null })
+    } catch (e) {
+      setState((s) => ({ ...s, loading: false, error: String(e.message || e) }))
+    }
+  }, [])
+  React.useEffect(() => { refresh() }, [refresh])
+  const save = React.useCallback(async (names) => {
+    await cliExec(['decision', 'settings-set', 'kanban_profile_hooks_exempt', JSON.stringify(names)])
+    setState((s) => ({ ...s, names }))
+  }, [])
+  return { ...state, refresh, save }
+}
+
+function KanbanProfileHooksExemptSection() {
+  const { loading, names, error, save } = useKanbanProfileHooksExempt()
+  const [draft, setDraft] = React.useState('')
+  const [saving, setSaving] = React.useState(false)
+
+  React.useEffect(() => { if (!loading) setDraft(names.join(', ')) }, [loading, names])
+
+  const commit = React.useCallback(async () => {
+    const next = [...new Set(draft.split(',').map((s) => s.trim()).filter(Boolean))]
+    setSaving(true)
+    try {
+      await save(next)
+      setDraft(next.join(', '))
+      host.notify({ kind: 'success', message: `Kanban hook exemptions updated (${next.length} profile(s))` })
+    } catch (e) {
+      host.notify({ kind: 'error', message: String(e.message || e) })
+    } finally {
+      setSaving(false)
+    }
+  }, [draft, save])
+
+  return jsxs('section', {
+    className: 'flex flex-col gap-2 mt-4 pt-4 border-t border-(--ui-stroke-secondary)',
+    children: [
+      jsx('div', { className: 'text-sm font-medium', children: 'Kanban profile hook exemptions' }),
+      jsx('p', {
+        className: 'text-[0.8rem] text-(--ui-text-secondary)',
+        children:
+          "Profile names the kanban_profile_hooks_sync.py cron job (every 30m) must never patch escalation hooks into — an intentionally hookless profile stays that way instead of being silently re-patched on the next tick. Comma-separated.",
+      }),
+      error ? jsx('div', { className: 'text-[0.75rem] text-(--ui-danger,#e5484d)', children: error }) : null,
+      jsxs('div', {
+        className: 'flex items-center gap-2',
+        children: [
+          jsx('input', {
+            type: 'text',
+            value: draft,
+            disabled: loading || saving,
+            placeholder: 'e.g. sandbox-test, legacy-worker',
+            onChange: (e) => setDraft(e.target.value),
+            onBlur: commit,
+            onKeyDown: (e) => { if (e.key === 'Enter') { e.currentTarget.blur() } },
+            className: 'h-7 flex-1 rounded border border-(--ui-stroke-secondary) bg-transparent px-2 text-[0.8rem]',
+          }),
+        ],
+      }),
+    ],
+  })
+}
 function KanbanEscalationScopeTab() {
   const { loading, scope, error, save } = useKanbanEscalationScope()
   const [saving, setSaving] = React.useState(false)
@@ -4031,6 +4112,7 @@ function KanbanEscalationScopeTab() {
           })
         ),
       }),
+      jsx(KanbanProfileHooksExemptSection, {}),
     ],
   })
 }
