@@ -79,28 +79,22 @@ const existingSource = await readFile(new URL('../plugin.js', import.meta.url), 
 const dashboardPane = findPane(registrations, DASHBOARD_PANE_ID)
 assert.ok(dashboardPane, `expected one additive ${DASHBOARD_PANE_ID} panes registration`)
 assert.equal(dashboardPane.title, 'Agent Dashboard')
-assert.deepEqual(dashboardPane.data?.dock, { pane: 'workspace', pos: 'right' })
-assert.match(String(dashboardPane.data?.minWidth), /^(?:\d+(?:\.\d+)?rem|\d+px)$/)
+// Default placement is 'session-tab' now (2026-09 owner decision — see
+// pinned-pane.test.mjs), which docks into the SESSIONS zone as a center
+// tab, not the old right-of-workspace column.
+assert.deepEqual(dashboardPane.data?.dock, { pane: 'sessions', pos: 'center', enforce: true })
 
-const dashboardRoute = findRoute(registrations, DASHBOARD_PATH)
-assert.ok(dashboardRoute, `expected a static dashboard route at ${DASHBOARD_PATH}`)
-const routeRender = renderRegistration(dashboardRoute)
-assert.equal(routeRender.error, null, 'dashboard route must render without throwing')
-assert.match(routeRender.html, /Agent Dashboard/i)
-assert.match(routeRender.html, /Show Agent Dashboard/i)
-assert.doesNotMatch(routeRender.html, /<input|<select|aria-label="Settings"/i, 'route fallback must not mount a second live dashboard tree')
+// The old /decision-hud/agent-dashboard reveal-and-redirect placeholder
+// route no longer exists — session-tab panes need no route at all.
+assert.equal(findRoute(registrations, DASHBOARD_PATH), undefined, `${DASHBOARD_PATH} route must no longer exist`)
 
-// Preserve the existing Decision HUD registration and route fallback while the
-// additive dashboard is introduced.
+// Preserve the existing Decision HUD registration (route fallback is gone
+// by design — see pinned-pane.test.mjs) while the additive dashboard is
+// introduced.
 const decisionPane = findPane(registrations, 'decision-hud:pane')
 assert.ok(decisionPane, 'existing Decision HUD pane registration must remain')
-assert.deepEqual(decisionPane.data?.dock, { pane: 'workspace', pos: 'right' })
-const decisionRoute = findRoute(registrations, '/decision-hud')
-assert.ok(decisionRoute, 'existing Decision HUD route must remain')
-const decisionRouteRender = renderRegistration(decisionRoute)
-assert.equal(decisionRouteRender.error, null)
-assert.match(decisionRouteRender.html, /Decision HUD lives in the docked pane/i)
-assert.match(decisionRouteRender.html, /Show Decision HUD/i)
+assert.deepEqual(decisionPane.data?.dock, { pane: 'sessions', pos: 'center', enforce: true })
+assert.equal(findRoute(registrations, '/decision-hud'), undefined, '/decision-hud route must no longer exist')
 
 // Render the existing stateful pane as a real component too. This guards the
 // protected surface from a dashboard integration that accidentally replaces it.

@@ -56,27 +56,26 @@ function findRoute(registrations, path) {
   return registrations.find((r) => r.area === 'routes' && r.data?.path === path)
 }
 
-function findNav(registrations, path) {
-  return registrations.find((r) => r.area === 'sidebar.nav' && r.data?.path === path)
-}
-
 function text(container) {
   return container.textContent.replace(/\s+/g, ' ').trim()
 }
 
-// Baseline: the route/nav contributions must exist, additively, alongside
-// the existing Decision HUD and Agent Dashboard registrations.
+// Baseline: the route contribution must exist, additively, alongside the
+// existing Decision HUD and Agent Dashboard registrations. No sidebar-nav
+// row is expected anymore (2026-09 owner decision: SIDEBAR_NAV_AREA rows for
+// these panes caused a visible flash/reload on every click, since a nav row
+// only carries a `path` and always round-trips through ROUTES_AREA — see
+// pinned-pane.test.mjs / palette-navigate-safety.test.mjs). The full page
+// stays reachable by direct deep link only.
 const registrations = collectRendered()
 const route = findRoute(registrations, ROUTE_PATH)
 assert.ok(route, `expected a ${ROUTE_PATH} route registration`)
-const nav = findNav(registrations, ROUTE_PATH)
-assert.ok(nav, `expected a sidebar nav entry for ${ROUTE_PATH}`)
-assert.equal(nav.data.label, 'Agent Metrics')
 
-const existingDecisionRoute = findRoute(registrations, '/decision-hud')
-assert.ok(existingDecisionRoute, 'existing Decision HUD route must remain')
-const existingDashboardRoute = findRoute(registrations, '/decision-hud/agent-dashboard')
-assert.ok(existingDashboardRoute, 'existing Agent Dashboard route must remain')
+// The old /decision-hud and /decision-hud/agent-dashboard reveal-and-redirect
+// placeholder routes are gone by design (see pinned-pane.test.mjs) — those
+// panes are session-tab-docked now and need no route at all.
+assert.equal(findRoute(registrations, '/decision-hud'), undefined, '/decision-hud route must no longer exist')
+assert.equal(findRoute(registrations, '/decision-hud/agent-dashboard'), undefined, '/decision-hud/agent-dashboard route must no longer exist')
 
 const validSnapshot = {
   schema_version: 'dashboard-read-model.v1',

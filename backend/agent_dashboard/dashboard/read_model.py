@@ -78,6 +78,7 @@ class DashboardStatus:
                         "value": raw_value,
                         "unit": unit,
                         "category": category,
+                        "agent_id": agent.agent_id,
                         "source_window": "telemetry",
                         "freshness": "missing" if agent.freshness.state == "missing" else "fresh",
                     }

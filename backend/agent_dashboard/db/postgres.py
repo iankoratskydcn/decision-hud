@@ -126,6 +126,34 @@ class PostgresMetricsRepository:
             snapshots.append(MetricSnapshot(row["payload"], row["record_id"]))
         return snapshots
 
+    async def list_scope_agent_ids(self, *, scope: str, limit: int = 500) -> list[str]:
+        """Discover every agent_id with at least one checkpoint in `scope`.
+
+        The read model's `status()` only reports on agent_ids the caller
+        already knows about — by design, so a caller intentionally
+        requesting a bounded roster gets exactly that roster back, "missing"
+        entries and all (see test_dashboard_read_model_is_bounded_and_...).
+        But the desktop pane has no independent source of truth for which
+        agents have ever reported telemetry in a project, so it needs this
+        separate discovery query to build that list itself before calling
+        status() — never silently widen status() itself to auto-discover,
+        which would break that bounded-roster contract for existing callers.
+        """
+        if not isinstance(scope, str) or not scope:
+            raise ValueError("scope is required")
+        conn = self._conn()
+        try:
+            async with conn.transaction():
+                cursor = await conn.execute(
+                    "SELECT DISTINCT agent_id FROM telemetry_snapshots WHERE scope = %s ORDER BY agent_id LIMIT %s",
+                    (scope, limit),
+                )
+                rows = await cursor.fetchall()
+        except Exception:
+            await conn.rollback()
+            raise
+        return [row["agent_id"] for row in rows]
+
     async def count_snapshots(self, *, scope: str, idempotency_key: str | None = None) -> int:
         conn = self._conn()
         try:

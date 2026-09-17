@@ -78,6 +78,7 @@ async def test_read_model_serializes_exact_plugin_v1_contract():
             "value": 12.5,
             "unit": "tokens/min",
             "category": "resource",
+            "agent_id": "agent-a",
             "source_window": "telemetry",
             "freshness": "fresh",
         }

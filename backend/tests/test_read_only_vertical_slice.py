@@ -166,3 +166,22 @@ async def test_read_model_rejects_unbounded_limit(repository, contract):
     model = read_model_type(repository)
     with pytest.raises((ValueError, TypeError)):
         await model.status(scope=SCOPE, agent_ids=["agent-a"], limit=10001)
+
+
+@pytest.mark.asyncio
+async def test_list_scope_agent_ids_discovers_reporters_scoped_and_deduped(repository, contract):
+    """Regression guard: the desktop pane has no independent agent roster for
+    telemetry (unlike kanban's assignees list), so `status(agent_ids=[])`
+    alone always returns zero agents even when the scope has real data. The
+    HTTP endpoint must call this discovery query first when the caller sent
+    no explicit agent_ids."""
+    await repository.write_checkpoint(_snapshot_payload(key="a1", agent="agent-a"))
+    await repository.write_checkpoint(_snapshot_payload(key="a2", agent="agent-a"))  # same agent, must dedupe
+    await repository.write_checkpoint(_snapshot_payload(key="b1", agent="agent-b"))
+    await repository.write_checkpoint(_snapshot_payload(key="other-scope", scope=OTHER_SCOPE, agent="agent-c"))
+
+    discovered = await repository.list_scope_agent_ids(scope=SCOPE)
+    assert sorted(discovered) == ["agent-a", "agent-b"]  # deduped, scoped, agent-c excluded
+
+    empty = await repository.list_scope_agent_ids(scope="project:nothing-here")
+    assert empty == []

@@ -10,19 +10,19 @@ const source = await readFile(resolve(here, '..', 'plugin.js'), 'utf8')
 // as the other data hooks in this file (useKanbanBoards, useHudMetrics).
 assert.match(
   source,
-  /function useAgentHealth\(\)/,
+  /function useAgentHealth\(telemetryByAgent\)/,
   'useAgentHealth hook must exist',
 )
 assert.match(
   source,
-  /function useAgentHealth\(\)[\s\S]*?setInterval\((?:poll|refresh), POLL_MS\)/,
+  /function useAgentHealth\(telemetryByAgent\)[\s\S]*?setInterval\((?:poll|refresh), POLL_MS\)/,
   'useAgentHealth must poll on the shared POLL_MS interval like the other hooks',
 )
 
 // It must derive its roster from the real CLI, not fabricate agents.
 assert.match(
   source,
-  /function useAgentHealth\(\)[\s\S]{0,4000}cliExec\(\['kanban', 'assignees', '--json'\]\)/,
+  /function useAgentHealth\(telemetryByAgent\)[\s\S]{0,4000}cliExec\(\['kanban', 'assignees', '--json'\]\)/,
   'useAgentHealth must call `hermes kanban assignees --json` via cliExec',
 )
 
@@ -30,12 +30,12 @@ assert.match(
 // rather than inventing a score out of thin air.
 assert.match(
   source,
-  /function useAgentHealth\(\)[\s\S]{0,4000}cliExec\(\['kanban', 'stats', '--json'\]\)/,
+  /function useAgentHealth\(telemetryByAgent\)[\s\S]{0,4000}cliExec\(\['kanban', 'stats', '--json'\]\)/,
   'useAgentHealth must call `hermes kanban stats --json` via cliExec',
 )
 
 // No Math.random or similarly fabricated scoring inside the hook body.
-const hookBodyMatch = source.match(/function useAgentHealth\(\)([\s\S]*?)\n}\n/)
+const hookBodyMatch = source.match(/function useAgentHealth\(telemetryByAgent\)([\s\S]*?)\n}\n/)
 assert.ok(hookBodyMatch, 'useAgentHealth body must be extractable for fabrication check')
 assert.doesNotMatch(
   hookBodyMatch[1],
