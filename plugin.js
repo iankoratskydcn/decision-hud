@@ -712,7 +712,10 @@ function safeArray(value) {
   return Array.isArray(value) ? value : []
 }
 
-function CardHeader({ decision }) {
+// CardHeader: project tag on the left; urgency label and the Dismiss (X)
+// icon grouped together on the right of the SAME row, so closing a card is
+// reachable without hunting for it among the bottom-row action buttons.
+function CardHeader({ decision, onDismiss, resolving }) {
   return jsxs('div', {
     className: 'flex items-center justify-between text-[0.7rem]',
     children: [
@@ -721,9 +724,15 @@ function CardHeader({ decision }) {
         style: { border: '1px solid var(--ui-stroke-secondary)' },
         children: safeText(decision.project_slug, decision.project_id),
       }),
-      jsx('span', {
-        style: { color: URGENCY_COLOR[decision.urgency] || URGENCY_COLOR.normal },
-        children: safeText(decision.urgency),
+      jsxs('div', {
+        className: 'flex items-center gap-2',
+        children: [
+          jsx('span', {
+            style: { color: URGENCY_COLOR[decision.urgency] || URGENCY_COLOR.normal },
+            children: safeText(decision.urgency),
+          }),
+          jsx(DismissButton, { disabled: resolving, onClick: () => onDismiss(decision.id) }),
+        ],
       }),
     ],
   })
@@ -3032,19 +3041,20 @@ function DecisionCard({ decision, onResolve, onDefer, onDiscuss, onDismiss, reso
     // every solid-bordered real decision card in the stack.
     style: isContextReadout ? { border: '1px dashed var(--ui-stroke-secondary)' } : undefined,
     children: [
-      jsx(CardHeader, { decision }),
+      jsx(CardHeader, { decision, onDismiss, resolving }),
       isContextReadout ? jsx(ContextReadoutTag, {}) : null,
       jsx(CardQuestion, { decision }),
       jsx(CardErrorBoundary, { decisionId: decision && decision.id, children: jsx(Body, { decision, onResolve, resolving }) }),
       // Shared across every card type (present vs future) — deliberately
-      // outside Body so a new CARD_RENDERERS entry gets Defer/Discuss/Dismiss
-      // for free without having to remember to wire them per-renderer.
+      // outside Body so a new CARD_RENDERERS entry gets Defer/Discuss for
+      // free without having to remember to wire them per-renderer. Dismiss
+      // now lives in the header row (top-right, next to urgency) instead of
+      // here; this row is right-aligned so Defer/Discuss sit flush right.
       jsxs('div', {
-        className: 'flex items-center gap-2',
+        className: 'flex items-center justify-end gap-2',
         children: [
           jsx(DeferButton, { disabled: resolving, onClick: () => onDefer(decision.id) }),
           jsx(DiscussButton, { disabled: resolving, onClick: () => onDiscuss(decision) }),
-          jsx(DismissButton, { disabled: resolving, onClick: () => onDismiss(decision.id) }),
         ],
       }),
     ],
@@ -4645,24 +4655,43 @@ function DecisionHudPane({ rest }) {
 
   const handleDiscuss = React.useCallback(
     async (decision) => {
-      // Compose a prompt so the user can talk this decision through at
-      // length in their own chat, rather than resolving from the card's
-      // bounded choice list. NOT host.navigate (a sibling review flagged it
-      // as unproven by any live mechanism in this repo and banned it — see
-      // palette-navigate-safety.test.mjs) and NOT session.create + navigate
-      // (same problem). Copy-to-clipboard via the standard Web Clipboard
-      // API needs no unproven Hermes-specific door: the user pastes into
-      // whichever chat they want, no new session forced.
+      // Open a brand-new chat session with this decision's context already
+      // sent as the first turn, so the user lands in a live conversation
+      // instead of an empty composer. host.newChat has no way to pre-seed a
+      // draft (PluginNewChatOptions carries only workspaceMode/
+      // workspaceOwnerKey — see apps/desktop/src/sdk/index.ts), so this goes
+      // through the general-purpose host.request RPC door this file already
+      // relies on for cli.exec: create a session, submit the prompt into
+      // it, then host.openSession to bring it into view. NOT host.navigate
+      // (banned — see palette-navigate-safety.test.mjs) and this is NOT the
+      // "session.create + navigate" combo that comment warns about either;
+      // host.openSession is a documented, proven SDK door for opening a
+      // session, unlike host.navigate. Any failure anywhere in this chain
+      // (older desktop, RPC rejected, etc.) falls back to the original
+      // clipboard-copy behavior so the action never dead-ends.
       haptic('tap')
+      const lines = [`Let's discuss this decision at length:\n\n**${decision.question || '(no question text)'}**`]
+      if (Array.isArray(decision.choices) && decision.choices.length > 0) {
+        lines.push(`\nChoices on the card: ${decision.choices.join(', ')}`)
+      }
+      if (decision.project_slug || decision.project_id) {
+        lines.push(`\nProject: ${decision.project_slug || decision.project_id}`)
+      }
+      const seedText = lines.join('\n')
       try {
-        const lines = [`Let's discuss this decision at length:\n\n**${decision.question || '(no question text)'}**`]
-        if (Array.isArray(decision.choices) && decision.choices.length > 0) {
-          lines.push(`\nChoices on the card: ${decision.choices.join(', ')}`)
+        const created = await host.request('session.create', { source: 'desktop' })
+        const sessionId = created && (created.session_id || created.id)
+        if (!sessionId) throw new Error('session.create returned no session_id')
+        await host.request('prompt.submit', { session_id: sessionId, text: seedText })
+        if (typeof host.openSession === 'function') {
+          host.openSession(sessionId, { intent: 'tab' })
         }
-        if (decision.project_slug || decision.project_id) {
-          lines.push(`\nProject: ${decision.project_slug || decision.project_id}`)
-        }
-        const seedText = lines.join('\n')
+        host.notify({ kind: 'success', message: 'Opened a new chat with this decision' })
+        return
+      } catch (e) {
+        // Fall through to clipboard — see rationale above.
+      }
+      try {
         if (!navigator.clipboard || typeof navigator.clipboard.writeText !== 'function') {
           throw new Error('Clipboard API unavailable in this environment')
         }
