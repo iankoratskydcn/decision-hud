@@ -2,3 +2,7 @@ node_modules/
 __pycache__/
 .pytest_cache/
 *.egg-info/
+*.db
+*.db-shm
+*.db-wal
+backend-plugin/**/__pycache__/
