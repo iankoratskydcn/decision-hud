@@ -2,16 +2,9 @@ name: decision-hud
 version: "0.1.0"
 description: >
   Cross-project Decision HUD: a durable queue of bounded owner decisions
-  (MCQ-style) that any agent/project can push into, and a lightweight card-stack
-  UI (paired desktop plugin) to clear them one at a time. Backend half owns the
-  SQLite queue and exposes `hermes decision ...` CLI commands the desktop pane
-  drives via cli.exec. Companion MCP server (decision_hud_mcp.py, configured
-  separately in mcp_servers:) is the producer-side write path for agents.
-  Resolution normally requires an actor token from the interactive path
-  (desktop pane / `hermes decision issue-token`); a break-glass
-  `issue_owner_override_token()` exists in db.py for owner-instructed
-  resolution when no interactive session is available — see db.py's module
-  docstring and tests/test_owner_override.py.
+  (MCQ-style) any agent can push into, cleared one at a time via a docked
+  card-stack UI. Agents write through the companion MCP server; the desktop
+  pane drives `hermes decision ...` CLI commands over SQLite.
 author: "Ian Koratsky"
 kind: standalone
 platforms:
