@@ -813,6 +813,21 @@ def push_decision(
         raise ValueError("recommended must be one of choices")
     if card_type is not None:
         _verify_card_type(card_type, card_type_bucket, card_type_answers)
+    # Capture the calling chat (if any) so a resolution can be delivered back
+    # to whoever asked, even for a standalone push with no originating kanban
+    # task — see kanban_decision_resolution_sweeper.py, which now also acts
+    # on _origin_platform/_origin_chat_id. Gateway-set per-session env vars;
+    # empty/absent for CLI-only or desktop-only sessions (nothing to send to).
+    import os
+    origin_platform = os.environ.get("HERMES_SESSION_PLATFORM", "").strip()
+    origin_chat_id = os.environ.get("HERMES_SESSION_CHAT_ID", "").strip()
+    if origin_platform and origin_chat_id:
+        card_payload = dict(card_payload or {})
+        card_payload.setdefault("_origin_platform", origin_platform)
+        card_payload.setdefault("_origin_chat_id", origin_chat_id)
+        thread_id = os.environ.get("HERMES_SESSION_THREAD_ID", "").strip()
+        if thread_id:
+            card_payload.setdefault("_origin_thread_id", thread_id)
     urgency = urgency if urgency in _VALID_URGENCY else "normal"
     did = uuid.uuid4().hex[:12]
     now = time.time()
