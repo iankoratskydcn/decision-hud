@@ -1780,8 +1780,7 @@ function ZoneSelectCard({ decision, onResolve, resolving }) {
     className: 'flex flex-col gap-2',
     children: [
       jsx('div', {
-        className: 'flex overflow-hidden rounded-md',
-        style: { border: '1px solid var(--ui-stroke-secondary)' },
+        className: 'flex flex-wrap gap-1.5',
         children: zones.map((zone, idx) => {
           const key = zone && zone.key !== undefined ? safeText(zone.key) : `zone-${idx}`
           const isSelected = selectedKey === key
@@ -1792,11 +1791,13 @@ function ZoneSelectCard({ decision, onResolve, resolving }) {
             onClick: () => setSelectedKey(key),
             title: safeText(zone && zone.description, ''),
             className: cn(
-              'flex-1 px-2 py-2 text-center text-[0.75rem] transition-colors',
+              'rounded-md border px-2.5 py-1.5 text-left text-[0.8rem] transition-colors',
               'hover:bg-(--chrome-action-hover) disabled:opacity-50'
             ),
             style: {
-              borderLeft: idx === 0 ? 'none' : '1px solid var(--ui-stroke-secondary)',
+              border: isSelected
+                ? '1px solid var(--ui-accent)'
+                : '1px solid var(--ui-stroke-secondary)',
               background: isSelected ? 'var(--ui-accent)/15' : 'transparent',
               color: isSelected ? 'var(--ui-accent)' : undefined,
               fontWeight: isSelected ? 600 : 400,
@@ -1811,14 +1812,30 @@ function ZoneSelectCard({ decision, onResolve, resolving }) {
             children: safeText(selectedZone.description),
           })
         : null,
-      jsx(ConfirmButton, {
-        disabled: selectedKey === null,
-        resolving,
-        onClick: () => {
-          const label = safeText(selectedZone && selectedZone.label, selectedKey)
-          onResolve(decision.id, label, { selected_key: selectedKey, summary: label })
-        },
-        children: selectedKey === null ? 'Select a zone' : `Confirm "${safeText(selectedZone && selectedZone.label, selectedKey)}"`,
+      jsxs('div', {
+        className: 'flex items-center justify-end gap-2',
+        children: [
+          jsx('button', {
+            type: 'button',
+            disabled: selectedKey === null || resolving,
+            onClick: () => setSelectedKey(null),
+            className: cn(
+              'mt-1 rounded-md border px-3 py-1.5 text-[0.8rem] font-medium',
+              'border-(--ui-stroke-secondary) text-(--ui-text-secondary)',
+              'transition-colors hover:bg-(--chrome-action-hover) disabled:opacity-40'
+            ),
+            children: 'Clear response',
+          }),
+          jsx(ConfirmButton, {
+            disabled: selectedKey === null,
+            resolving,
+            onClick: () => {
+              const label = safeText(selectedZone && selectedZone.label, selectedKey)
+              onResolve(decision.id, label, { selected_key: selectedKey, summary: label })
+            },
+            children: selectedKey === null ? 'Select a zone' : `Confirm "${safeText(selectedZone && selectedZone.label, selectedKey)}"`,
+          }),
+        ],
       }),
     ],
   })
@@ -5158,10 +5175,73 @@ function DecisionHudPane({ rest }) {
 
 const PANE_ID = `${PLUGIN_ID}:pane`
 
+// --- New-decision toast watcher -------------------------------------------
+// Independent of the pane's own poll loop (useDecisionQueue is scoped to one
+// board/project and only runs while its pane is mounted): this watcher polls
+// EVERY project's pending decisions and toasts once per newly-seen id, so a
+// decision surfaces even if the user never opens the Decision HUD pane.
+// Seen-id set persists in localStorage (survives reload; a fresh install or
+// a cleared browser storage just re-toasts current pending decisions once,
+// which is harmless).
+const SEEN_DECISIONS_STORAGE_KEY = 'decision-hud:seen-decision-ids'
+
+function loadSeenDecisionIds() {
+  try {
+    const raw = localStorage.getItem(SEEN_DECISIONS_STORAGE_KEY)
+    return new Set(raw ? JSON.parse(raw) : [])
+  } catch {
+    return new Set()
+  }
+}
+
+function saveSeenDecisionIds(ids) {
+  try {
+    // Cap so this never grows unbounded across a long-lived install.
+    localStorage.setItem(SEEN_DECISIONS_STORAGE_KEY, JSON.stringify([...ids].slice(-500)))
+  } catch {
+    // localStorage unavailable — toasts still fire, just may repeat across reloads.
+  }
+}
+
+function startNewDecisionToastWatcher() {
+  const seen = loadSeenDecisionIds()
+  let primed = false // first tick marks existing pending decisions as seen without toasting
+
+  const tick = async () => {
+    let decisions
+    try {
+      const res = await cliExec(['decision', 'list', '--limit', '50'])
+      decisions = res.decisions || []
+    } catch {
+      return // transient CLI/gateway hiccup — next tick retries
+    }
+    const currentIds = new Set(decisions.map((d) => d.id))
+    if (!primed) {
+      for (const id of currentIds) seen.add(id)
+      saveSeenDecisionIds(seen)
+      primed = true
+      return
+    }
+    for (const d of decisions) {
+      if (seen.has(d.id)) continue
+      seen.add(d.id)
+      host.notify({
+        kind: d.urgency === 'high' ? 'error' : 'info',
+        message: `Decision HUD: ${d.question}`,
+      })
+    }
+    saveSeenDecisionIds(seen)
+  }
+
+  tick()
+  setInterval(tick, POLL_MS)
+}
+
 export default {
   id: PLUGIN_ID,
   name: 'Decision HUD',
   register(ctx) {
+    startNewDecisionToastWatcher()
     // Docked pane: registering ONLY on `panes` (never on ROUTES_AREA as the
     // sole surface) is what makes it survive chat/session switching. A page
     // mounted directly on ROUTES_AREA occupies the main content slot, so
