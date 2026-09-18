@@ -922,6 +922,13 @@ function safeArray(value) {
   return Array.isArray(value) ? value : []
 }
 
+function kanbanResolutionPayload(decision, choice) {
+  const contract = decision && decision.card_payload && decision.card_payload._kanban_resolution
+  const action = contract && contract.actions && contract.actions[choice]
+  if (!action || contract.contract_version !== 1) return null
+  return { action, contract_version: contract.contract_version }
+}
+
 // CardHeader: project tag on the left; urgency label and the Dismiss (X)
 // icon grouped together on the right of the SAME row, so closing a card is
 // reachable without hunting for it among the bottom-row action buttons.
@@ -1038,7 +1045,7 @@ function DefaultChoiceCard({ decision, onResolve, resolving }) {
           key: safeText(choice),
           type: 'button',
           disabled: resolving,
-          onClick: () => onResolve(decision.id, choice, null),
+          onClick: () => onResolve(decision.id, choice, kanbanResolutionPayload(decision, choice)),
           className: cn(
             'rounded-md px-2.5 py-1.5 text-left text-[0.8rem] transition-colors',
             'hover:bg-(--chrome-action-hover) disabled:opacity-50'

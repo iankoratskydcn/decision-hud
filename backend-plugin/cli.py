@@ -443,7 +443,20 @@ def _cmd_triage_blocked(args) -> None:
         try:
             pending = db.list_pending(conn, project_id=args.project_id, limit=10000)
             for root, group in groups.items():
-                payload = {"_kanban_task_ids": sorted(set(group["task_ids"])), "_kanban_board": args.board, "_kanban_root_task_id": root, "_triage_kind": "kanban_blocked", "evidence": group["evidence"][:20]}
+                payload = {
+                    "_triage_contract_version": 1,
+                    "_kanban_task_id": root,
+                    "_kanban_task_ids": sorted(set(group["task_ids"])),
+                    "_kanban_board": args.board,
+                    "_kanban_root_task_id": root,
+                    "_kanban_status": "blocked",
+                    "_triage_kind": "kanban_blocked",
+                    "_kanban_resolution": {
+                        "contract_version": 1,
+                        "actions": {"Unblock after verification": "unblock", "Leave blocked": "leave_blocked"},
+                    },
+                    "evidence": group["evidence"][:20],
+                }
                 existing = next((d for d in pending if d.get("card_payload") == payload), None)
                 if existing:
                     created.append(existing)

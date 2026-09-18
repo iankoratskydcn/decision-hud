@@ -3,6 +3,8 @@ import { readFile } from 'node:fs/promises'
 
 const source = await readFile(new URL('../plugin.js', import.meta.url), 'utf8')
 
+assert.match(source, /function kanbanResolutionPayload\(/)
+assert.match(source, /kanbanResolutionPayload\(decision, choice\)/)
 assert.match(source, /function TriageBlockedWorkButton\(/)
 assert.match(source, /Triage blocked work/)
 assert.match(source, /cliExec\(\['kanban', '--board', boardSlug, 'diagnostics', '--json'\]\)/)
