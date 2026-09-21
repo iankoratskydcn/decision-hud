@@ -11,6 +11,7 @@ import importlib.util
 import json
 import os
 import re
+import subprocess
 import sys
 from pathlib import Path
 from typing import Optional
@@ -397,6 +398,26 @@ def _diag_kind(row):
     return str(row.get("kind") or row.get("code") or row.get("type") or "").lower()
 
 
+def _validate_board_project(board: str, project_id: str) -> None:
+    """Reject triage when the board and HUD project identities diverge."""
+    try:
+        result = subprocess.run(
+            ["hermes", "kanban", "boards", "list", "--json"],
+            check=True, capture_output=True, text=True, timeout=10,
+        )
+        boards = json.loads(result.stdout)
+    except (OSError, subprocess.SubprocessError, json.JSONDecodeError) as exc:
+        raise ValueError(f"could not verify board/project mapping: {exc}") from exc
+    match = next((row for row in boards if row.get("slug") == board), None)
+    if match is None:
+        raise ValueError(f"kanban board {board!r} does not exist")
+    if match.get("project_id") != project_id:
+        raise ValueError(
+            f"board {board!r} maps to project {match.get('project_id')!r}, "
+            f"not HUD project {project_id!r}; refusing to create triage cards"
+        )
+
+
 def _cmd_triage_blocked(args) -> None:
     try:
         diagnostics = _rows(_triage_json(args.diagnostics, "diagnostics"), ("diagnostics", "items", "rows"))
@@ -406,6 +427,7 @@ def _cmd_triage_blocked(args) -> None:
             raise ValueError("--graph must be a JSON object")
         if not args.board.strip():
             raise ValueError("--board is required")
+        _validate_board_project(args.board, args.project_id)
         blocked_ids = {_task_id(task) for task in blocked if isinstance(task, dict)}
         by_task = {}
         for row in diagnostics:
