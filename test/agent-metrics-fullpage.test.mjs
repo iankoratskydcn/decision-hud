@@ -60,22 +60,15 @@ function text(container) {
   return container.textContent.replace(/\s+/g, ' ').trim()
 }
 
-// Baseline: the route contribution must exist, additively, alongside the
-// existing Decision HUD and Agent Dashboard registrations. No sidebar-nav
-// row is expected anymore (2026-09 owner decision: SIDEBAR_NAV_AREA rows for
-// these panes caused a visible flash/reload on every click, since a nav row
-// only carries a `path` and always round-trips through ROUTES_AREA — see
-// pinned-pane.test.mjs / palette-navigate-safety.test.mjs). The full page
-// stays reachable by direct deep link only.
+// The route is a first-class workspace surface, with sidebar navigation like
+// Kanban. Decision HUD and Agent Matrix are also expected to be route-backed;
+// Task List remains the separate docked operational queue.
 const registrations = collectRendered()
 const route = findRoute(registrations, ROUTE_PATH)
 assert.ok(route, `expected a ${ROUTE_PATH} route registration`)
-
-// The old /decision-hud and /decision-hud/agent-dashboard reveal-and-redirect
-// placeholder routes are gone by design (see pinned-pane.test.mjs) — those
-// panes are session-tab-docked now and need no route at all.
-assert.equal(findRoute(registrations, '/decision-hud'), undefined, '/decision-hud route must no longer exist')
-assert.equal(findRoute(registrations, '/decision-hud/agent-dashboard'), undefined, '/decision-hud/agent-dashboard route must no longer exist')
+assert.ok(findRoute(registrations, '/decision-hud'), 'Decision HUD page route must exist')
+assert.ok(findRoute(registrations, '/decision-hud/agent-metrics'), 'Agent Dashboard page route must exist')
+assert.ok(findRoute(registrations, '/decision-hud/agent-metrics/snapshot'), 'Agent Matrix page route must exist')
 
 const validSnapshot = {
   schema_version: 'dashboard-read-model.v1',

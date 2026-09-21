@@ -24,7 +24,7 @@
  * older or hand-pushed decisions with no card_type set.
  */
 
-import { Badge, Button, cn, Codicon, haptic, host, PALETTE_AREA, ROUTES_AREA, Select, SelectContent, SelectItem, SelectTrigger, SelectValue, Separator, Switch, useValue } from '@hermes/plugin-sdk'
+import { Badge, Button, cn, Codicon, haptic, host, PALETTE_AREA, ROUTES_AREA, SIDEBAR_NAV_AREA, Select, SelectContent, SelectItem, SelectTrigger, SelectValue, Separator, Switch, useValue } from '@hermes/plugin-sdk'
 import { jsx, jsxs } from 'react/jsx-runtime'
 import * as React from 'react'
 
@@ -3624,7 +3624,7 @@ const DIAL_COLS_MAX = 2
 // plugin load, so a change here only takes effect after "Reload desktop
 // plugins" — same constraint as any other registration-time plugin config.
 const PANE_PLACEMENT_STORAGE_KEY = 'decision-hud:pane-placement'
-const DEFAULT_PANE_PLACEMENT = { decisionHud: 'session-tab', agentDashboard: 'session-tab', taskList: 'session-tab' }
+const DEFAULT_PANE_PLACEMENT = { decisionHud: 'right', agentDashboard: 'right', taskList: 'right' }
 
 function loadPanePlacement() {
   try {
@@ -3716,7 +3716,7 @@ function PanePlacementControls() {
       }),
       row('decisionHud', 'Decision HUD'),
       row('agentDashboard', 'Agent Dashboard / Metrics'),
-      row('taskList', 'Task List'),
+      jsx('div', { className: 'text-[0.7rem] text-(--ui-text-tertiary)', children: 'Task List remains docked beside chat.' }),
       jsx(Button, {
         variant: 'outline',
         size: 'xs',
@@ -4427,7 +4427,7 @@ function SettingsFullscreen({ isOpen, onClose, layout, onGridChange, sidebarSett
                       jsx(GridLayoutControls, { layout, onChange: onGridChange }),
                       jsx(SidebarPositionControls, { settings: sidebarSettings, onChange: onSidebarChange }),
                       jsx(Separator, {}),
-                      jsx(PanePlacementControls, {}),
+                      jsx('div', { className: 'text-[0.75rem] text-(--ui-text-tertiary)', children: 'Decision HUD and Agent Matrix open as full workspace pages. Task List remains docked beside chat.' }),
                     ],
                   }),
             }),
@@ -5292,87 +5292,75 @@ export default {
   name: 'Decision HUD',
   register(ctx) {
     startNewDecisionToastWatcher()
-    // Docked pane: registering ONLY on `panes` (never on ROUTES_AREA as the
-    // sole surface) is what makes it survive chat/session switching. A page
-    // mounted directly on ROUTES_AREA occupies the main content slot, so
-    // navigating to any chat session (also a route change) evicts it — the
-    // original "why did my Decision HUD disappear" bug. `panes` docks a
-    // sibling tab beside the workspace (same mechanism the Kanban Bots pane
-    // and the terminal pane use) — it stays mounted, and its poll loop keeps
-    // running, no matter which chat session is active or focused.
-    ctx.register({
-      id: PANE_ID,
-      area: 'panes',
-      title: 'Decision HUD',
-      // Placement is now a user setting (Layout tab -> Pane placement),
-      // not a fixed choice: 'right' is the original docked column, while
-      // 'session-tab' docks into the SESSIONS zone as a center tab, same
-      // pattern as the Kanban Bots pane
-      // (apps/desktop/src/plugins/hermes-bots/plugin.tsx). Read once at
-      // registration time — like any plugin config, a change here needs
-      // "Reload desktop plugins" to take effect.
-      data: paneRegistrationData(loadPanePlacement().decisionHud),
-      render: () => jsx(DecisionHudPane, { rest: ctx.rest }),
-    })
-    // Agent Metrics full page: same DASHBOARD_READ_MODEL_PATH read model as
-    // the (now-removed) docked Agent Dashboard pane, at full page size,
-    // reachable only by direct deep link — no sidebar-nav row, no palette
-    // command (see the palette-registration comment further below for why).
-    ctx.register({
-      id: 'agent-metrics-route',
-      area: ROUTES_AREA,
-      data: { path: AGENT_METRICS_ROUTE_PATH },
-      render: () => jsx(AgentMetricsPage, { rest: ctx.rest }),
-    })
-    // Separate route/surface for the agent_metrics_snapshot.py-backed
-    // widget set (heatmap/scatter/parallel-coords/treemap/radar/sankey) —
-    // different data source than AgentMetricsPage above (Kanban SQLite via
-    // cli.exec, not the Postgres DASHBOARD_READ_MODEL_PATH read model).
-    // Same reachable-by-direct-deep-link-only pattern as agent-metrics-route.
-    ctx.register({
-      id: 'agent-metrics-widgets-route',
-      area: ROUTES_AREA,
-      data: { path: AGENT_METRICS_WIDGETS_ROUTE_PATH },
-      render: () => jsx(AgentMetricsWidgetsPage, {}),
-    })
-    // No SIDEBAR_NAV_AREA rows anymore: both panes now default to
-    // 'session-tab' placement (see DEFAULT_PANE_PLACEMENT above), which docks
-    // them as real tabs in the SESSIONS zone tab strip — the same mechanism
-    // the built-in Bots pane uses (apps/desktop/src/plugins/hermes-bots/
-    // plugin.tsx registers `panes` + `dock: { pane: 'sessions', ... }` with NO
-    // sidebar-nav row and NO route at all). A SidebarNavContribution only
-    // takes a `path` (no onClick), so it always routes through ROUTES_AREA
-    // first; even the reveal-and-redirect placeholder pattern (navigate away,
-    // then host.revealPane + history.back()) produced a visible flash/reload
-    // on every click — confirmed live, this is the bug this fix removes.
-    // Clicking the tab strip entry switches tabs directly; no navigation
-    // event, no placeholder page, no flash. AGENT_METRICS_ROUTE_PATH's full
-    // page (registered just above) stays reachable by direct deep link only.
-    // Palette command to re-surface the docked pane specifically (e.g. after
-    // closing/minimizing its tab) without going through the route at all.
-    ctx.register({
-      id: 'open',
-      area: PALETTE_AREA,
-      data: {
-        id: 'decision-hud.open',
-        label: 'Decision HUD: Show pane',
-        keywords: ['decision', 'hud', 'queue', 'pin', 'pane'],
-        run: () => host.revealPane(PANE_ID),
+    // Full-page surfaces, matching the Kanban board: route navigation owns
+    // the main workspace, so switching chats cannot evict or resize them.
+    ctx.registerMany([
+      {
+        id: 'decision-hud-page',
+        area: ROUTES_AREA,
+        data: { path: '/decision-hud' },
+        render: () => jsx(DecisionHudPane, { rest: ctx.rest }),
       },
-    })
-    // No palette command for the Agent Metrics full page: unlike every other
-    // affordance in this file, reaching a ROUTES_AREA page from a palette
-    // command has no mechanism here that's proven live. host.revealPane
-    // targets a `panes` registration (PANE_ID here), not a route, so it
-    // can't front this page; the only thing that CAN change the active
-    // route is host.navigate, which this file never calls anywhere else and
-    // which the test harness's fake @hermes/plugin-sdk stubs out as a no-op
-    // identical in shape to its revealPane stub — a green test here would
-    // prove nothing about whether the real desktop app's host.navigate
-    // actually works (see commit 9d31e1a, where an equally test-clean but
-    // unverified mechanism broke live). The page is already reachable
-    // through 'agent-metrics-nav' above, which uses the SAME `path` field
-    // the router already resolves for every other route in this plugin —
-    // no new, unverified capability required.
+      {
+        id: 'decision-hud-nav',
+        area: SIDEBAR_NAV_AREA,
+        order: 40,
+        data: { codicon: 'checklist', label: 'Decision HUD', path: '/decision-hud' },
+      },
+      {
+        id: 'agent-metrics-route',
+        area: ROUTES_AREA,
+        data: { path: AGENT_METRICS_ROUTE_PATH },
+        render: () => jsx(AgentMetricsPage, { rest: ctx.rest }),
+      },
+      {
+        id: 'agent-metrics-nav',
+        area: SIDEBAR_NAV_AREA,
+        order: 45,
+        data: { codicon: 'graph', label: 'Agent Dashboard', path: AGENT_METRICS_ROUTE_PATH },
+      },
+      {
+        id: 'agent-metrics-widgets-route',
+        area: ROUTES_AREA,
+        data: { path: AGENT_METRICS_WIDGETS_ROUTE_PATH },
+        render: () => jsx(AgentMetricsWidgetsPage, {}),
+      },
+      {
+        id: 'agent-metrics-widgets-nav',
+        area: SIDEBAR_NAV_AREA,
+        order: 46,
+        data: { codicon: 'pulse', label: 'Agent Matrix', path: AGENT_METRICS_WIDGETS_ROUTE_PATH },
+      },
+      {
+        id: 'decision-hud-open',
+        area: PALETTE_AREA,
+        data: {
+          id: 'decision-hud.open',
+          label: 'Decision HUD: Open page',
+          keywords: ['decision', 'hud', 'queue', 'page'],
+          run: () => host.navigate('/decision-hud'),
+        },
+      },
+      {
+        id: 'agent-metrics-open',
+        area: PALETTE_AREA,
+        data: {
+          id: 'decision-hud.agent-metrics',
+          label: 'Agent Dashboard: Open page',
+          keywords: ['agent', 'dashboard', 'metrics'],
+          run: () => host.navigate(AGENT_METRICS_ROUTE_PATH),
+        },
+      },
+      {
+        id: 'agent-matrix-open',
+        area: PALETTE_AREA,
+        data: {
+          id: 'decision-hud.agent-matrix',
+          label: 'Agent Matrix: Open page',
+          keywords: ['agent', 'matrix', 'charts', 'tradeoffs'],
+          run: () => host.navigate(AGENT_METRICS_WIDGETS_ROUTE_PATH),
+        },
+      },
+    ])
   },
 }
