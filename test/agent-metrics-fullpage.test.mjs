@@ -61,13 +61,13 @@ function text(container) {
 }
 
 // The route is a first-class workspace surface, with sidebar navigation like
-// Kanban. Decision HUD and Agent Matrix are also expected to be route-backed;
+// Kanban. Decision HUD, Agent Metrics, and Agent Matrix are route-backed;
 // Task List remains the separate docked operational queue.
 const registrations = collectRendered()
 const route = findRoute(registrations, ROUTE_PATH)
 assert.ok(route, `expected a ${ROUTE_PATH} route registration`)
 assert.ok(findRoute(registrations, '/decision-hud'), 'Decision HUD page route must exist')
-assert.ok(findRoute(registrations, '/decision-hud/agent-metrics'), 'Agent Dashboard page route must exist')
+assert.ok(findRoute(registrations, '/decision-hud/agent-metrics'), 'Agent Metrics page route must exist')
 assert.ok(findRoute(registrations, '/decision-hud/agent-metrics/snapshot'), 'Agent Matrix page route must exist')
 
 const validSnapshot = {

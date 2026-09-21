@@ -31,7 +31,7 @@ import * as React from 'react'
 const PLUGIN_ID = 'decision-hud'
 const POLL_MS = 4000
 
-// --- Agent Dashboard (additive interface) ----------------------------------
+// --- Agent Metrics (read-only interface) ----------------------------------
 // Inlined directly in this file — NOT split into dashboard/AgentDashboard.js —
 // because the desktop app's runtime plugin loader evaluates plugin.js as a
 // single blob URL (apps/desktop/src/contrib/runtime-loader.ts). Blob URLs
@@ -116,7 +116,7 @@ function saveSelectedBoardSlug(slug) {
 // single-board setup, e.g. the "Default" option seen in the board
 // dropdown) over just grabbing boards[0] — a board list is not guaranteed
 // to return "default" first, and picking an arbitrary board would scope
-// the Agent Dashboard to the wrong project on a multi-board setup. Falls
+// the Agent Metrics to the wrong project on a multi-board setup. Falls
 // back to the first board when there is no "default"-slugged one.
 function pickDefaultBoardSlug(boards) {
   if (!Array.isArray(boards) || boards.length === 0) return null
@@ -152,10 +152,10 @@ function useProjectDashboardScope() {
     return undefined
   }, [])
 
-  // Owner request: Agent Dashboard/Metrics must work without ever visiting
+  // Owner request: Agent Metrics must work without ever visiting
   // Decision HUD first — before this fix, no persisted selection meant an
   // indefinite "Select a board in Decision HUD to scope the Agent
-  // Dashboard" dead end even when boards existed and one of them is
+  // Metrics" dead end even when boards existed and one of them is
   // "default". Auto-resolve and PERSIST the default board slug the same
   // way DecisionHudPane's own auto-select effect does, so both panes
   // converge on the same board and the choice is not silently re-guessed
@@ -253,7 +253,7 @@ function dashboardStatusText(snapshot) {
 }
 
 function DashboardLoadingState() {
-  return jsx('div', { role: 'status', children: 'Loading Agent Dashboard…' })
+  return jsx('div', { role: 'status', children: 'Loading Agent Metrics…' })
 }
 
 function DashboardMessageState({ children }) {
@@ -3715,7 +3715,7 @@ function PanePlacementControls() {
         children: 'Docked pins the pane beside chat; session tab adds it next to SESSIONS/BOTS instead.',
       }),
       row('decisionHud', 'Decision HUD'),
-      row('agentDashboard', 'Agent Dashboard / Metrics'),
+      row('agentDashboard', 'Agent Metrics'),
       jsx('div', { className: 'text-[0.7rem] text-(--ui-text-tertiary)', children: 'Task List remains docked beside chat.' }),
       jsx(Button, {
         variant: 'outline',
@@ -5317,7 +5317,7 @@ export default {
         id: 'agent-metrics-nav',
         area: SIDEBAR_NAV_AREA,
         order: 45,
-        data: { codicon: 'graph', label: 'Agent Dashboard', path: AGENT_METRICS_ROUTE_PATH },
+        data: { codicon: 'graph', label: 'Agent Metrics', path: AGENT_METRICS_ROUTE_PATH },
       },
       {
         id: 'agent-metrics-widgets-route',
@@ -5346,8 +5346,8 @@ export default {
         area: PALETTE_AREA,
         data: {
           id: 'decision-hud.agent-metrics',
-          label: 'Agent Dashboard: Open page',
-          keywords: ['agent', 'dashboard', 'metrics'],
+          label: 'Agent Metrics: Open page',
+          keywords: ['agent', 'metrics'],
           run: () => host.navigate(AGENT_METRICS_ROUTE_PATH),
         },
       },
