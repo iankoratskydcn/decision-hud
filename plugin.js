@@ -768,9 +768,42 @@ function agentMetricsAssignees(records) {
   return [...new Set(records.map((r) => r.assignee))].sort()
 }
 
+// Cross-filter selection shape shared by every widget below:
+// { assignee: string|null, outcome: string|null } — either field alone is a
+// valid partial filter (e.g. clicking a treemap/radar assignee segment sets
+// only `assignee`), both set together is the precise heatmap-cell case.
+// null/null means "no selection, show everything at full opacity."
+const EMPTY_METRICS_SELECTION = { assignee: null, outcome: null }
+
+function metricsSelectionIsEmpty(sel) {
+  return !sel || (!sel.assignee && !sel.outcome)
+}
+
+// Whether a given (assignee, outcome) pair matches the current selection —
+// a partial selection (only assignee OR only outcome set) matches on
+// whichever field(s) are set, so clicking a treemap assignee segment dims
+// every OTHER assignee's data across every chart without requiring an
+// outcome to also match.
+function metricsRecordMatchesSelection(sel, assignee, outcome) {
+  if (metricsSelectionIsEmpty(sel)) return true
+  if (sel.assignee && sel.assignee !== assignee) return false
+  if (sel.outcome && sel.outcome !== outcome) return false
+  return true
+}
+
+// Shared visual weight for matched vs dimmed marks — every widget uses the
+// same two opacity levels so the "isolate one variable" effect reads
+// consistently across chart types (a dimmed heatmap cell should look as
+// muted as a dimmed sankey band).
+const METRICS_MATCH_OPACITY = 1
+const METRICS_DIM_OPACITY = 0.12
+
 // Heatmap: assignee x outcome grid, cell intensity = volume. Plain DOM grid
-// (no SVG needed for a grid of colored cells).
-function AgentMetricsHeatmap({ records }) {
+// (no SVG needed for a grid of colored cells). Clicking a cell toggles it as
+// the cross-filter selection (click again to clear) — this is the primary
+// entry point for "isolate one variable" triage; other widgets read the same
+// `selected`/`onSelect` pair so a heatmap click drives every chart below it.
+function AgentMetricsHeatmap({ records, selected, onSelect }) {
   if (records.length === 0) return jsx(DashboardMessageState, { children: 'No agent metrics available' })
   const assignees = agentMetricsAssignees(records)
   const outcomes = agentMetricsOutcomes(records)
@@ -786,13 +819,20 @@ function AgentMetricsHeatmap({ records }) {
         ...outcomes.map((o) => {
           const rec = byKey.get(`${a}\u0000${o}`)
           const intensity = rec ? rec.volume / maxVolume : 0
+          const isMatch = metricsRecordMatchesSelection(selected, a, o)
+          const isExactCell = selected && selected.assignee === a && selected.outcome === o
           return jsx('div', {
             'data-heatmap-cell': 'true',
-            title: rec ? `${a} / ${o}: volume ${rec.volume}` : `${a} / ${o}: no data`,
+            role: rec ? 'button' : undefined,
+            tabIndex: rec ? 0 : undefined,
+            title: rec ? `${a} / ${o}: volume ${rec.volume} (click to isolate)` : `${a} / ${o}: no data`,
+            onClick: rec ? () => onSelect(isExactCell ? EMPTY_METRICS_SELECTION : { assignee: a, outcome: o }) : undefined,
             style: {
               minHeight: '24px',
               background: rec ? `rgba(80,140,255,${0.15 + intensity * 0.75})` : 'transparent',
-              border: '1px solid var(--ui-stroke-secondary)',
+              border: isExactCell ? '2px solid #fff' : '1px solid var(--ui-stroke-secondary)',
+              opacity: isMatch ? METRICS_MATCH_OPACITY : METRICS_DIM_OPACITY,
+              cursor: rec ? 'pointer' : 'default',
               display: 'flex', alignItems: 'center', justifyContent: 'center',
             },
             children: rec ? String(rec.volume) : '',
@@ -804,7 +844,7 @@ function AgentMetricsHeatmap({ records }) {
 }
 
 // Scatter: avg_duration_s (x) vs volume (y), one point per (assignee, outcome).
-function AgentMetricsScatter({ records }) {
+function AgentMetricsScatter({ records, selected }) {
   if (records.length === 0) return jsx(DashboardMessageState, { children: 'No agent metrics available' })
   const W = 320, H = 220, PAD = 30
   const maxDuration = Math.max(1, ...records.map((r) => r.avg_duration_s))
@@ -813,19 +853,20 @@ function AgentMetricsScatter({ records }) {
     x: PAD + (r.avg_duration_s / maxDuration) * (W - 2 * PAD),
     y: H - PAD - (r.volume / maxVolume) * (H - 2 * PAD),
     label: `${r.assignee} / ${r.outcome}: ${r.avg_duration_s.toFixed(0)}s, vol ${r.volume}`,
+    match: metricsRecordMatchesSelection(selected, r.assignee, r.outcome),
   }))
   return jsxs('svg', {
     width: W, height: H, role: 'img', 'aria-label': 'avg duration vs volume scatter plot',
     children: [
       jsx('line', { x1: PAD, y1: H - PAD, x2: W - PAD, y2: H - PAD, stroke: 'var(--ui-stroke-secondary)' }),
       jsx('line', { x1: PAD, y1: PAD, x2: PAD, y2: H - PAD, stroke: 'var(--ui-stroke-secondary)' }),
-      ...points.map((p, i) => jsxs('g', { children: [jsx('circle', { cx: p.x, cy: p.y, r: 4, fill: '#508cff' }), jsx('title', { children: p.label })] }, `pt-${i}`)),
+      ...points.map((p, i) => jsxs('g', { opacity: p.match ? METRICS_MATCH_OPACITY : METRICS_DIM_OPACITY, children: [jsx('circle', { cx: p.x, cy: p.y, r: p.match && !metricsSelectionIsEmpty(selected) ? 6 : 4, fill: '#508cff' }), jsx('title', { children: p.label })] }, `pt-${i}`)),
     ],
   })
 }
 
 // Parallel coordinates: assignee -> outcome -> volume -> avg_duration_s axes.
-function AgentMetricsParallelCoordinates({ records }) {
+function AgentMetricsParallelCoordinates({ records, selected }) {
   if (records.length === 0) return jsx(DashboardMessageState, { children: 'No agent metrics available' })
   const W = 360, H = 200, PAD = 20
   const assignees = agentMetricsAssignees(records)
@@ -844,10 +885,14 @@ function AgentMetricsParallelCoordinates({ records }) {
     width: W, height: H, role: 'img', 'aria-label': 'parallel coordinates: assignee, outcome, volume, avg duration',
     children: [
       ...axes.map((axis, i) => jsx('line', { x1: axisX(i), y1: PAD, x2: axisX(i), y2: H - PAD, stroke: 'var(--ui-stroke-secondary)' }, `axis-${axis}`)),
-      ...records.map((r, i) => jsx('polyline', {
-        points: axes.map((axis, ai) => `${axisX(ai)},${yFor(axis, r)}`).join(' '),
-        fill: 'none', stroke: '#508cff', strokeOpacity: 0.5,
-      }, `line-${i}`)),
+      ...records.map((r, i) => {
+        const match = metricsRecordMatchesSelection(selected, r.assignee, r.outcome)
+        return jsx('polyline', {
+          points: axes.map((axis, ai) => `${axisX(ai)},${yFor(axis, r)}`).join(' '),
+          fill: 'none', stroke: '#508cff', strokeOpacity: match ? 0.9 : METRICS_DIM_OPACITY,
+          strokeWidth: match && !metricsSelectionIsEmpty(selected) ? 2 : 1,
+        }, `line-${i}`)
+      }),
     ],
   })
 }
@@ -855,7 +900,10 @@ function AgentMetricsParallelCoordinates({ records }) {
 // Treemap: nested by assignee, sized by volume. Simple single-level
 // slice-and-dice layout (rows sized proportional to each assignee's total
 // volume) — no nested-rectangle algorithm needed for one grouping level.
-function AgentMetricsTreemap({ records }) {
+// Clicking a segment sets the assignee half of the cross-filter (outcome
+// stays whatever it was, so heatmap-cell drill-down composes with a
+// treemap click rather than one silently overwriting the other's axis).
+function AgentMetricsTreemap({ records, selected, onSelect }) {
   if (records.length === 0) return jsx(DashboardMessageState, { children: 'No agent metrics available' })
   const W = 320, H = 220
   const totals = new Map()
@@ -871,19 +919,27 @@ function AgentMetricsTreemap({ records }) {
   const palette = ['#508cff', '#5fd0a0', '#f0a860', '#e06880', '#a878e0', '#60c8d8']
   return jsxs('svg', {
     width: W, height: H, role: 'img', 'aria-label': 'volume by assignee treemap',
-    children: rects.map((r, i) => jsxs('g', {
-      children: [
-        jsx('rect', { x: r.x, y: r.y, width: r.w, height: Math.max(0, r.h - 1), fill: palette[i % palette.length], fillOpacity: 0.75 }),
-        jsx('title', { children: `${r.assignee}: volume ${r.volume}` }),
-        r.h > 14 ? jsx('text', { x: r.x + 4, y: r.y + 14, fontSize: 11, fill: '#fff', children: `${r.assignee} (${r.volume})` }) : null,
-      ],
-    }, `rect-${r.assignee}`)),
+    children: rects.map((r, i) => {
+      const match = !selected || !selected.assignee || selected.assignee === r.assignee
+      const isExact = selected && selected.assignee === r.assignee && !selected.outcome
+      return jsxs('g', {
+        style: { cursor: 'pointer' },
+        onClick: () => onSelect(isExact ? EMPTY_METRICS_SELECTION : { assignee: r.assignee, outcome: null }),
+        children: [
+          jsx('rect', { x: r.x, y: r.y, width: r.w, height: Math.max(0, r.h - 1), fill: palette[i % palette.length], fillOpacity: match ? 0.75 : METRICS_DIM_OPACITY, stroke: isExact ? '#fff' : 'none', strokeWidth: 2 }),
+          jsx('title', { children: `${r.assignee}: volume ${r.volume} (click to isolate)` }),
+          r.h > 14 ? jsx('text', { x: r.x + 4, y: r.y + 14, fontSize: 11, fill: '#fff', opacity: match ? 1 : METRICS_DIM_OPACITY, children: `${r.assignee} (${r.volume})` }) : null,
+        ],
+      }, `rect-${r.assignee}`)
+    }),
   })
 }
 
 // Radar: per-assignee profile across outcome categories (volume per outcome,
-// normalized to that outcome's max across assignees).
-function AgentMetricsRadar({ records }) {
+// normalized to that outcome's max across assignees). Clicking a polygon's
+// outline/fill isolates that assignee, same composable assignee-only filter
+// as the treemap.
+function AgentMetricsRadar({ records, selected, onSelect }) {
   if (records.length === 0) return jsx(DashboardMessageState, { children: 'No agent metrics available' })
   const W = 260, H = 260, CX = W / 2, CY = H / 2, R = 100
   const outcomes = agentMetricsOutcomes(records)
@@ -907,8 +963,15 @@ function AgentMetricsRadar({ records }) {
       const a = angleFor(i)
       return `${CX + R * ratio * Math.cos(a)},${CY + R * ratio * Math.sin(a)}`
     }).join(' ')
+    const match = !selected || !selected.assignee || selected.assignee === assignee
+    const isExact = selected && selected.assignee === assignee && !selected.outcome
     return jsxs('g', {
-      children: [jsx('polygon', { points: pts, fill: palette[ai % palette.length], fillOpacity: 0.2, stroke: palette[ai % palette.length] }), jsx('title', { children: assignee })],
+      style: { cursor: 'pointer' },
+      onClick: () => onSelect(isExact ? EMPTY_METRICS_SELECTION : { assignee, outcome: null }),
+      children: [
+        jsx('polygon', { points: pts, fill: palette[ai % palette.length], fillOpacity: match ? 0.2 : 0.03, stroke: palette[ai % palette.length], strokeOpacity: match ? 1 : METRICS_DIM_OPACITY, strokeWidth: isExact ? 3 : 1 }),
+        jsx('title', { children: `${assignee} (click to isolate)` }),
+      ],
     }, `poly-${assignee}`)
   })
   return jsxs('svg', { width: W, height: H, role: 'img', 'aria-label': 'per-assignee outcome radar', children: [...axisLines, ...polygons] })
@@ -917,8 +980,9 @@ function AgentMetricsRadar({ records }) {
 // Sankey: handoffs[] from -> to flow. Two-column layout (from-nodes left,
 // to-nodes right) with flow bands sized by volume — the simplest sankey
 // shape that fits this data (handoffs is already a flat from/to/volume
-// list, not a multi-stage graph).
-function AgentMetricsSankey({ handoffs }) {
+// list, not a multi-stage graph). Selection here filters by assignee only
+// (handoffs have no `outcome` field), matching either endpoint of a band.
+function AgentMetricsSankey({ handoffs, selected, onSelect }) {
   if (handoffs.length === 0) return jsx(DashboardMessageState, { children: 'No handoffs available' })
   const W = 360, H = 240, NODE_W = 10
   const fromNodes = [...new Set(handoffs.map((h) => h.from))]
@@ -950,27 +1014,80 @@ function AgentMetricsSankey({ handoffs }) {
     toCursor.set(h.to, y1 + bandH)
     const x0 = NODE_W, x1 = W - NODE_W
     const path = `M${x0},${y0} C${W / 2},${y0} ${W / 2},${y1} ${x1},${y1} L${x1},${y1 + bandH} C${W / 2},${y1 + bandH} ${W / 2},${y0 + bandH} ${x0},${y0 + bandH} Z`
-    return jsxs('g', { children: [jsx('path', { d: path, fill: palette[i % palette.length], fillOpacity: 0.45 }), jsx('title', { children: `${h.from} -> ${h.to}: ${h.volume}` })] }, `band-${h.from}-${h.to}`)
+    const match = !selected || !selected.assignee || selected.assignee === h.from || selected.assignee === h.to
+    return jsxs('g', { children: [jsx('path', { d: path, fill: palette[i % palette.length], fillOpacity: match ? 0.45 : 0.04 }), jsx('title', { children: `${h.from} -> ${h.to}: ${h.volume}` })] }, `band-${h.from}-${h.to}`)
   })
-  const fromLabels = fromNodes.map((n) => jsx('text', { x: 0, y: fromPos.get(n).y + fromPos.get(n).h / 2, fontSize: 10, children: n }, `from-label-${n}`))
-  const toLabels = toNodes.map((n) => jsx('text', { x: W, y: toPos.get(n).y + toPos.get(n).h / 2, fontSize: 10, textAnchor: 'end', children: n }, `to-label-${n}`))
+  const fromLabels = fromNodes.map((n) => {
+    const isExact = selected && selected.assignee === n
+    return jsx('text', {
+      x: 0, y: fromPos.get(n).y + fromPos.get(n).h / 2, fontSize: 10, style: { cursor: 'pointer' },
+      fontWeight: isExact ? 700 : 400,
+      onClick: () => onSelect(isExact ? EMPTY_METRICS_SELECTION : { assignee: n, outcome: null }),
+      children: n,
+    }, `from-label-${n}`)
+  })
+  const toLabels = toNodes.map((n) => {
+    const isExact = selected && selected.assignee === n
+    return jsx('text', {
+      x: W, y: toPos.get(n).y + toPos.get(n).h / 2, fontSize: 10, textAnchor: 'end', style: { cursor: 'pointer' },
+      fontWeight: isExact ? 700 : 400,
+      onClick: () => onSelect(isExact ? EMPTY_METRICS_SELECTION : { assignee: n, outcome: null }),
+      children: n,
+    }, `to-label-${n}`)
+  })
   return jsxs('svg', { width: W, height: H, role: 'img', 'aria-label': 'agent handoff sankey diagram', children: [...bands, ...fromLabels, ...toLabels] })
+}
+
+// Filter summary bar shown above the widget grid once a cross-filter
+// selection is active — states which assignee/outcome is isolated and
+// gives one obvious way to clear it (every widget's own click-to-toggle
+// is a second way, but a persistent visible bar is what makes "quick
+// visual triage" actually quick — no hunting for which chart to re-click).
+function AgentMetricsSelectionBar({ selected, onClear }) {
+  if (metricsSelectionIsEmpty(selected)) return null
+  const parts = []
+  if (selected.assignee) parts.push(`assignee = ${selected.assignee}`)
+  if (selected.outcome) parts.push(`outcome = ${selected.outcome}`)
+  return jsxs('div', {
+    style: {
+      display: 'flex', alignItems: 'center', gap: '8px', marginBottom: '10px',
+      padding: '6px 10px', borderRadius: '6px', border: '1px solid var(--ui-stroke-secondary)',
+      background: 'var(--ui-surface-secondary, rgba(80,140,255,0.08))', fontSize: '12px',
+    },
+    children: [
+      jsx('span', { style: { color: 'var(--ui-text-secondary)' }, children: 'Isolated: ' }),
+      jsx('span', { style: { fontWeight: 600 }, children: parts.join(', ') }),
+      jsx('button', {
+        type: 'button', onClick: onClear,
+        style: { marginLeft: 'auto', border: '1px solid var(--ui-stroke-secondary)', borderRadius: '4px', padding: '2px 8px', background: 'transparent', color: 'inherit', cursor: 'pointer', fontSize: '11px' },
+        children: 'Clear',
+      }),
+    ],
+  })
 }
 
 function AgentMetricsWidgetsBody({ snapshot }) {
   const records = Array.isArray(snapshot.records) ? snapshot.records : []
   const handoffs = Array.isArray(snapshot.handoffs) ? snapshot.handoffs : []
+  // Cross-filter selection is owned here (not per-widget) so a click in any
+  // one chart (heatmap cell, treemap segment, radar polygon, sankey node)
+  // drives every other chart's highlight/dim state — that shared-state lift
+  // is what makes this a "click one thing, see it everywhere" triage tool
+  // instead of six independently-clickable but disconnected charts.
+  const [selected, setSelected] = React.useState(EMPTY_METRICS_SELECTION)
+  const clearSelection = React.useCallback(() => setSelected(EMPTY_METRICS_SELECTION), [])
   if (records.length === 0 && handoffs.length === 0) {
     return jsx(DashboardMessageState, { children: 'No agent metrics available' })
   }
   return jsxs('div', {
     children: [
-      jsx(AgentMetricsWidgetsSection, { title: 'Heatmap (assignee x outcome, volume)', dataKey: 'heatmap', children: jsx(AgentMetricsHeatmap, { records }) }),
-      jsx(AgentMetricsWidgetsSection, { title: 'Scatter (avg duration vs volume)', dataKey: 'scatter', children: jsx(AgentMetricsScatter, { records }) }),
-      jsx(AgentMetricsWidgetsSection, { title: 'Parallel Coordinates (assignee/outcome/volume/duration)', dataKey: 'parallel-coordinates', children: jsx(AgentMetricsParallelCoordinates, { records }) }),
-      jsx(AgentMetricsWidgetsSection, { title: 'Treemap (volume by assignee)', dataKey: 'treemap', children: jsx(AgentMetricsTreemap, { records }) }),
-      jsx(AgentMetricsWidgetsSection, { title: 'Radar (per-assignee outcome profile)', dataKey: 'radar', children: jsx(AgentMetricsRadar, { records }) }),
-      jsx(AgentMetricsWidgetsSection, { title: 'Sankey (handoff flow)', dataKey: 'sankey', children: jsx(AgentMetricsSankey, { handoffs }) }),
+      jsx(AgentMetricsSelectionBar, { selected, onClear: clearSelection }),
+      jsx(AgentMetricsWidgetsSection, { title: 'Heatmap (assignee x outcome, volume) — click a cell to isolate', dataKey: 'heatmap', children: jsx(AgentMetricsHeatmap, { records, selected, onSelect: setSelected }) }),
+      jsx(AgentMetricsWidgetsSection, { title: 'Scatter (avg duration vs volume)', dataKey: 'scatter', children: jsx(AgentMetricsScatter, { records, selected }) }),
+      jsx(AgentMetricsWidgetsSection, { title: 'Parallel Coordinates (assignee/outcome/volume/duration)', dataKey: 'parallel-coordinates', children: jsx(AgentMetricsParallelCoordinates, { records, selected }) }),
+      jsx(AgentMetricsWidgetsSection, { title: 'Treemap (volume by assignee) — click a segment to isolate', dataKey: 'treemap', children: jsx(AgentMetricsTreemap, { records, selected, onSelect: setSelected }) }),
+      jsx(AgentMetricsWidgetsSection, { title: 'Radar (per-assignee outcome profile) — click a polygon to isolate', dataKey: 'radar', children: jsx(AgentMetricsRadar, { records, selected, onSelect: setSelected }) }),
+      jsx(AgentMetricsWidgetsSection, { title: 'Sankey (handoff flow) — click a node label to isolate', dataKey: 'sankey', children: jsx(AgentMetricsSankey, { handoffs, selected, onSelect: setSelected }) }),
     ],
   })
 }
