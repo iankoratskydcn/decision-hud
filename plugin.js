@@ -306,6 +306,13 @@ class SectionErrorBoundary extends React.Component {
 // synthetic telemetry may omit it); those metrics land in an explicit
 // 'uncategorized' bucket rather than being dropped or guessed into one.
 const AGENT_METRICS_ROUTE_PATH = '/decision-hud/agent-metrics'
+// Retirement (Wave 2b): the canonical replacement page. Kept as a plain
+// string, not imported from Wave 2a's page module — that page lives on a
+// separate isolated-worktree branch and is not merged into this one yet;
+// Wave 3's merge ritual reconciles both. This route stays registered as a
+// redirect/alias for one release cycle per the consolidation plan, not a
+// second page.
+const AGENT_DASHBOARD_CANONICAL_ROUTE_PATH = '/decision-hud/agent-dashboard'
 const UNCATEGORIZED_KEY = 'uncategorized'
 
 // Category -> display-label lookup for the full-page Agent Metrics view.
@@ -426,6 +433,16 @@ function AgentMetricsPageBody({ snapshot }) {
       }),
     ],
   })
+}
+
+// Retired nav entry (Wave 2b): the route stays registered as a redirect so
+// old links/bookmarks/palette entries keep working for one release cycle,
+// per the consolidation plan — it is an alias, not a second page.
+function AgentMetricsRedirect() {
+  React.useEffect(() => {
+    host.navigate(AGENT_DASHBOARD_CANONICAL_ROUTE_PATH)
+  }, [])
+  return jsx(DashboardMessageState, { children: 'Agent Metrics has moved to Agent Dashboard. Redirecting…' })
 }
 
 function AgentMetricsPage({ rest }) {
@@ -5451,16 +5468,13 @@ export default {
         },
       },
       {
+        // Wave 2b retirement: route stays registered (old links/bookmarks
+        // keep working) but renders a redirect, and the nav entry below is
+        // removed — Agent Metrics is no longer a visible nav destination.
         id: 'agent-metrics-route',
         area: ROUTES_AREA,
         data: { path: AGENT_METRICS_ROUTE_PATH },
-        render: () => jsx(AgentMetricsPage, { rest: ctx.rest }),
-      },
-      {
-        id: 'agent-metrics-nav',
-        area: SIDEBAR_NAV_AREA,
-        order: 45,
-        data: { codicon: 'graph', label: 'Agent Metrics', path: AGENT_METRICS_ROUTE_PATH },
+        render: () => jsx(AgentMetricsRedirect, {}),
       },
       {
         id: 'agent-metrics-widgets-route',
