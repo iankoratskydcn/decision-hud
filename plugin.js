@@ -4200,7 +4200,7 @@ function PanePlacementControls() {
         children: 'Docked pins the pane beside chat; session tab adds it next to SESSIONS/BOTS instead.',
       }),
       row('decisionHud', 'Decision HUD'),
-      row('agentDashboard', 'Agent Metrics'),
+      row('agentDashboard', 'Agent Matrix'),
       jsx('div', { className: 'text-[0.7rem] text-(--ui-text-tertiary)', children: 'Task List remains docked beside chat.' }),
       jsx(Button, {
         variant: 'outline',
@@ -5140,11 +5140,63 @@ const FALLBACK_AGENT_HEALTH_METRICS = [
   { key: 'review', label: 'Review' },
 ]
 const AGENT_HEALTH_BAR_COLORS = ['bg-(--ui-success,#3dd68c)', 'bg-(--ui-accent,#5b8def)', 'bg-(--ui-danger,#e5484d)']
-const DEFAULT_AGENT_HEALTH_BARS = [
-  { metric: 'done', enabled: true },
-  { metric: 'todo', enabled: true },
-  { metric: 'blocked', enabled: true },
+// Normalization modes for bar length, toggleable per slot (owner decision:
+// "toggle any of these as an additional option compared to what's being
+// measured" — not a single fixed scheme). All three read the SAME
+// population: whichever agents currently have a numeric value for that
+// metric in this snapshot (see agentHealthMetricStats below) — there is no
+// historical/long-window store to draw from yet, so this is deliberately an
+// on-screen-snapshot early-warning signal, not a long-run baseline; it will
+// sharpen as more telemetry accumulates.
+const AGENT_HEALTH_NORMALIZE_MODES = [
+  { key: 'max', label: 'Max (0-100%)' },
+  { key: 'percentile', label: 'Percentile rank' },
+  { key: 'zscore', label: 'Z-score' },
 ]
+const DEFAULT_AGENT_HEALTH_BARS = [
+  { metric: 'done', enabled: true, normalize: 'max' },
+  { metric: 'todo', enabled: true, normalize: 'max' },
+  { metric: 'blocked', enabled: true, normalize: 'max' },
+]
+
+// agentHealthMetricStats: per-metric distribution stats (max, mean, stdev,
+// sorted values) across whatever agents have a real numeric value for that
+// metric right now. Computed once per render from the full agent list so
+// every card's bar reads a consistent population, not just "the agents
+// rendered so far".
+function agentHealthMetricStats(agents, metricKey) {
+  const values = agents
+    .map((a) => (typeof a.counts?.[metricKey] === 'number' ? a.counts[metricKey] : null))
+    .filter((v) => v !== null)
+    .sort((a, b) => a - b)
+  const n = values.length
+  const max = n > 0 ? Math.max(...values) : 0
+  const mean = n > 0 ? values.reduce((s, v) => s + v, 0) / n : 0
+  const variance = n > 0 ? values.reduce((s, v) => s + (v - mean) ** 2, 0) / n : 0
+  const stdev = Math.sqrt(variance)
+  return { values, n, max, mean, stdev }
+}
+
+// agentHealthBarPct: turn one agent's raw metric value into a 0-100 bar
+// length under the requested normalization mode. Every mode degrades
+// gracefully to 0 when the population can't support it (e.g. a single data
+// point has no meaningful percentile/z-score) rather than dividing by zero.
+function agentHealthBarPct(value, stats, mode) {
+  if (stats.n === 0) return 0
+  if (mode === 'percentile') {
+    const rank = stats.values.filter((v) => v <= value).length
+    return Math.max(0, Math.min(100, (rank / stats.n) * 100))
+  }
+  if (mode === 'zscore') {
+    if (stats.stdev === 0) return value > stats.mean ? 100 : value < stats.mean ? 0 : 50
+    const z = (value - stats.mean) / stats.stdev
+    // Clamp to +/-3 sigma and rescale to 0-100 so the bar stays on-screen.
+    return Math.max(0, Math.min(100, ((z + 3) / 6) * 100))
+  }
+  // 'max' (default): plain min-max against the largest value seen.
+  const max = stats.max || 1
+  return Math.max(0, Math.min(100, (value / max) * 100))
+}
 
 function useAgentHealthBarSettings(availableMetrics) {
   const [state, setState] = React.useState({ bars: DEFAULT_AGENT_HEALTH_BARS, loading: true, error: null })
@@ -5164,6 +5216,7 @@ function useAgentHealthBarSettings(availableMetrics) {
           ? parsed.map((b, i) => ({
               metric: metricKeys.includes(b?.metric) ? b.metric : metricKeys[i] || metricKeys[0],
               enabled: Boolean(b?.enabled),
+              normalize: AGENT_HEALTH_NORMALIZE_MODES.some((m) => m.key === b?.normalize) ? b.normalize : 'max',
             }))
           : DEFAULT_AGENT_HEALTH_BARS
       } catch {
@@ -5255,6 +5308,17 @@ function AgentHealthBarSettings({ availableMetrics }) {
                       }),
                     ],
                   }),
+                  jsxs(Select, {
+                    value: bar.normalize || 'max',
+                    disabled: saving,
+                    onValueChange: (value) => updateSlot(index, { normalize: value }),
+                    children: [
+                      jsx(SelectTrigger, { className: 'h-7 w-28 text-[0.75rem]', children: jsx(SelectValue, {}) }),
+                      jsx(SelectContent, {
+                        children: AGENT_HEALTH_NORMALIZE_MODES.map((m) => jsx(SelectItem, { value: m.key, children: m.label }, m.key)),
+                      }),
+                    ],
+                  }),
                 ],
               })
             ),
@@ -5280,7 +5344,7 @@ function humanizeAgentName(name) {
     .join(' ')
 }
 
-function AgentHealthCard({ agent, bars, maxByMetric }) {
+function AgentHealthCard({ agent, bars, statsByMetric }) {
   const visibleBars = bars.filter((b) => b.enabled)
   return jsxs('div', {
     className: 'flex flex-col gap-1 rounded border border-(--ui-stroke-secondary) px-2 py-1.5',
@@ -5296,8 +5360,8 @@ function AgentHealthCard({ agent, bars, maxByMetric }) {
             className: 'flex flex-col gap-0.5',
             children: visibleBars.map((bar, i) => {
               const value = typeof agent.counts?.[bar.metric] === 'number' ? agent.counts[bar.metric] : 0
-              const max = maxByMetric[bar.metric] || 1
-              const pct = Math.max(0, Math.min(100, (value / max) * 100))
+              const stats = statsByMetric[bar.metric] || { n: 0, max: 0, mean: 0, stdev: 0, values: [] }
+              const pct = agentHealthBarPct(value, stats, bar.normalize || 'max')
               return jsxs('div', {
                 key: bar.metric,
                 className: 'flex items-center gap-1.5',
@@ -5305,7 +5369,7 @@ function AgentHealthCard({ agent, bars, maxByMetric }) {
                   jsx('span', {
                     className: 'w-10 shrink-0 truncate uppercase tracking-wide text-(--ui-text-tertiary)',
                     style: { fontSize: '0.55rem', lineHeight: '0.75rem' },
-                    title: `${bar.metric}: ${value}`,
+                    title: `${bar.metric}: ${value} (${bar.normalize || 'max'})`,
                     children: bar.metric,
                   }),
                   jsx('div', {
@@ -5352,9 +5416,9 @@ function AgentHealthList({ health, availableMetrics }) {
   }
 
   const anyData = agents.some((a) => a.hasData)
-  const maxByMetric = {}
+  const statsByMetric = {}
   for (const bar of bars) {
-    maxByMetric[bar.metric] = Math.max(1, ...agents.map((a) => (typeof a.counts?.[bar.metric] === 'number' ? a.counts[bar.metric] : 0)))
+    statsByMetric[bar.metric] = agentHealthMetricStats(agents, bar.metric)
   }
 
   return jsxs('div', {
@@ -5371,7 +5435,7 @@ function AgentHealthList({ health, availableMetrics }) {
           })
         : jsx('div', {
             className: 'flex flex-col gap-1',
-            children: agents.map((a) => jsx(AgentHealthCard, { key: a.name, agent: a, bars, maxByMetric })),
+            children: agents.map((a) => jsx(AgentHealthCard, { key: a.name, agent: a, bars, statsByMetric })),
           }),
     ],
   })
@@ -5811,18 +5875,24 @@ export default {
         render: () => jsx(AgentDashboardCombinedPage, { rest: ctx.rest }),
       },
       {
+        // Wave 3 consolidation: the combined page (dashboard metrics +
+        // all six matrix widgets, stacked) is the ONLY visible Agent
+        // Dashboard/Matrix nav destination — the owner explicitly does not
+        // want separate "Agent Dashboard" and "Agent Matrix" nav entries
+        // when one page already contains everything the other did. Named
+        // "Agent Matrix" per owner preference, not "Agent Dashboard".
         id: 'agent-dashboard-nav',
         area: SIDEBAR_NAV_AREA,
         order: 44,
-        data: { codicon: 'dashboard', label: 'Agent Dashboard', path: AGENT_DASHBOARD_ROUTE_PATH },
+        data: { codicon: 'pulse', label: 'Agent Matrix', path: AGENT_DASHBOARD_ROUTE_PATH },
       },
       {
         id: 'agent-dashboard-open',
         area: PALETTE_AREA,
         data: {
           id: 'decision-hud.agent-dashboard',
-          label: 'Agent Dashboard: Open page',
-          keywords: ['agent', 'dashboard', 'metrics', 'matrix'],
+          label: 'Agent Matrix: Open page',
+          keywords: ['agent', 'dashboard', 'metrics', 'matrix', 'heatmap', 'charts'],
           run: () => host.navigate(AGENT_DASHBOARD_ROUTE_PATH),
         },
       },
@@ -5836,16 +5906,16 @@ export default {
         render: () => jsx(AgentMetricsRedirect, {}),
       },
       {
+        // Wave 3 retirement: the standalone widgets-only page is now fully
+        // subsumed by the combined Agent Dashboard/Matrix page above (it
+        // renders the identical AgentMetricsWidgetsBody). Route stays
+        // registered so old links/bookmarks/palette history keep working,
+        // but it is no longer a distinct nav destination — matching the
+        // AGENT_METRICS_ROUTE_PATH retirement pattern immediately above.
         id: 'agent-metrics-widgets-route',
         area: ROUTES_AREA,
         data: { path: AGENT_METRICS_WIDGETS_ROUTE_PATH },
         render: () => jsx(AgentMetricsWidgetsPage, {}),
-      },
-      {
-        id: 'agent-metrics-widgets-nav',
-        area: SIDEBAR_NAV_AREA,
-        order: 46,
-        data: { codicon: 'pulse', label: 'Agent Matrix', path: AGENT_METRICS_WIDGETS_ROUTE_PATH },
       },
       {
         id: 'comparison-panel-route',
@@ -5880,12 +5950,16 @@ export default {
         },
       },
       {
+        // Wave 3: retired in favor of 'agent-dashboard-open' above (same
+        // "Agent Matrix: Open page" label now points at the combined page)
+        // — kept registered only so it still resolves for the old
+        // widgets-only route in case a palette history/macro references it.
         id: 'agent-matrix-open',
         area: PALETTE_AREA,
         data: {
-          id: 'decision-hud.agent-matrix',
-          label: 'Agent Matrix: Open page',
-          keywords: ['agent', 'matrix', 'charts', 'tradeoffs'],
+          id: 'decision-hud.agent-matrix-legacy',
+          label: 'Agent Matrix (legacy widgets page): Open page',
+          keywords: ['agent', 'matrix', 'charts', 'tradeoffs', 'legacy'],
           run: () => host.navigate(AGENT_METRICS_WIDGETS_ROUTE_PATH),
         },
       },
