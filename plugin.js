@@ -1257,13 +1257,18 @@ function CardQuestion({ decision }) {
 }
 
 function ConfirmButton({ disabled, resolving, onClick, children }) {
+  // Explicit border (matches Clear response / Defer's bordered look) so
+  // this reads as a button at a glance — it was already a semantic
+  // <button type="button">, but the tinted-background-only styling with no
+  // border was visually indistinguishable from a plain blue text link
+  // (owner-reported).
   return jsx('button', {
     type: 'button',
     disabled: disabled || resolving,
     onClick,
     className: cn(
-      'mt-1 rounded-md px-3 py-1.5 text-[0.8rem] font-medium',
-      'bg-(--ui-accent)/15 text-(--ui-accent)',
+      'mt-1 rounded-md border px-3 py-1.5 text-[0.8rem] font-medium',
+      'border-(--ui-accent) bg-(--ui-accent)/15 text-(--ui-accent)',
       'transition-colors hover:bg-(--ui-accent) hover:text-(--ui-on-accent,#fff)',
       'disabled:opacity-40 disabled:hover:bg-(--ui-accent)/15 disabled:hover:text-(--ui-accent)'
     ),
@@ -3563,9 +3568,62 @@ class CardErrorBoundary extends React.Component {
   }
 }
 
+function OtherCommentsField({ value, onChange, disabled }) {
+  // Shared, independent "Other comments" box (owner-requested) — lives in
+  // DecisionCard, not any individual renderer, so every card type gets it
+  // for free. Deliberately non-exclusive: typing here never requires or
+  // clears whatever the card's own control (choice/slider/mapping/...)
+  // selected, and a selection never clears this text — same
+  // non-mutually-exclusive rule the decision-hud-cards skill already
+  // requires for the MCQ-plus-free-text fallback card, generalized to
+  // every shaped card too.
+  return jsxs('label', {
+    className: 'flex flex-col gap-1',
+    children: [
+      jsx('span', {
+        className: 'text-[0.65rem] uppercase tracking-wide text-(--ui-text-tertiary)',
+        children: 'Other comments',
+      }),
+      jsx('textarea', {
+        value,
+        disabled,
+        onChange: (e) => onChange(e.target.value),
+        placeholder: 'Optional — additional context, caveats, or notes',
+        rows: 2,
+        className: cn(
+          'w-full resize-y rounded-md px-2.5 py-1.5 text-[0.8rem]',
+          'bg-transparent placeholder:text-(--ui-text-tertiary) disabled:opacity-40'
+        ),
+        style: { border: '1px solid var(--ui-stroke-secondary)' },
+      }),
+    ],
+  })
+}
+
 function DecisionCard({ decision, onResolve, onDefer, onDiscuss, onDismiss, resolving }) {
   const Body = CARD_RENDERERS[decision.card_type] || DefaultChoiceCard
   const isContextReadout = decision.card_type === 'context_readout'
+  const [comment, setComment] = React.useState('')
+
+  // Wrap onResolve so every renderer's own Confirm action (however it
+  // builds its summary/payload) transparently gets the comment merged in,
+  // without each of the 20+ CARD_RENDERERS entries needing to know this
+  // field exists. Empty/whitespace-only comment is omitted entirely rather
+  // than persisted as ''.
+  const handleResolve = React.useCallback(
+    (id, summary, payload) => {
+      const trimmed = comment.trim()
+      if (!trimmed) {
+        onResolve(id, summary, payload)
+        return
+      }
+      const mergedPayload = payload && typeof payload === 'object' ? { ...payload, comment: trimmed } : { comment: trimmed }
+      const mergedSummary = summary ? `${summary} (comment: ${trimmed})` : `(comment: ${trimmed})`
+      onResolve(id, mergedSummary, mergedPayload)
+    },
+    [comment, onResolve]
+  )
+
   return jsxs('div', {
     className: cn(
       'flex flex-col gap-3 rounded-lg border p-4',
@@ -3578,7 +3636,14 @@ function DecisionCard({ decision, onResolve, onDefer, onDiscuss, onDismiss, reso
       jsx(CardHeader, { decision, onDismiss, resolving }),
       isContextReadout ? jsx(ContextReadoutTag, {}) : null,
       jsx(CardQuestion, { decision }),
-      jsx(CardErrorBoundary, { decisionId: decision && decision.id, children: jsx(Body, { decision, onResolve, resolving }) }),
+      jsx(CardErrorBoundary, { decisionId: decision && decision.id, children: jsx(Body, { decision, onResolve: handleResolve, resolving }) }),
+      // Shared across every card type (present vs future) — deliberately
+      // outside Body, same rationale as Discuss/Defer below: a new
+      // CARD_RENDERERS entry gets the comments field for free without
+      // having to remember to wire it per-renderer. Context Readout has no
+      // real Confirm (Dismiss-only), so it's excluded — there is nothing
+      // for a comment to attach to.
+      isContextReadout ? null : jsx(OtherCommentsField, { value: comment, onChange: setComment, disabled: resolving }),
       // Shared across every card type (present vs future) — deliberately
       // outside Body so a new CARD_RENDERERS entry gets Defer/Discuss for
       // free without having to remember to wire them per-renderer. Dismiss
