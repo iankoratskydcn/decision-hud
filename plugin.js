@@ -827,6 +827,91 @@ function AgentMetricsWidgetsPage() {
 }
 // --- End Agent Metrics Widgets --------------------------------------------
 
+// --- Agent Dashboard (canonical merged page, Wave 2a) ---------------------
+// Stacks the dashboard read-model section (health/freshness/categorized
+// metrics, Postgres-backed) above the Agent Matrix widgets section
+// (heatmap/scatter/parallel-coords/treemap/radar/sankey, Kanban-SQLite-
+// backed) on one page, sharing ONE board/project selector — no duplicate
+// pane tree. The two sections keep their existing independent data paths
+// (see the "genuinely separate surface" comment above
+// AGENT_METRICS_WIDGETS_ROUTE_PATH): the widgets snapshot has no
+// project-scoping parameter today, so it stays Kanban-wide rather than
+// silently (and incorrectly) filtered by the read-model's project scope —
+// each section fetches and fails independently, so one backend's outage
+// never blanks the other (Wave 2c will add richer unavailable-state UI;
+// this page already gets that for free since each section already renders
+// its own loading/error state).
+const AGENT_DASHBOARD_ROUTE_PATH = '/decision-hud/agent-dashboard'
+
+function AgentDashboardCombinedPage({ rest }) {
+  const scope = useProjectDashboardScope()
+  const [readModel, setReadModel] = React.useState({ loading: true, snapshot: null, error: null })
+  const [widgets, setWidgets] = React.useState({ loading: true, snapshot: null, error: null })
+
+  React.useLayoutEffect(() => {
+    let active = true
+    if (scope.loading) {
+      setReadModel({ loading: true, snapshot: null, error: null })
+      return () => { active = false }
+    }
+    if (!scope.projectId) {
+      setReadModel({ loading: false, snapshot: null, error: scope.error || 'Select a board in Decision HUD to scope the dashboard' })
+      return () => { active = false }
+    }
+    if (!scope.token) {
+      setReadModel({ loading: false, snapshot: null, error: scope.error || 'Unable to obtain a project-scoped actor token' })
+      return () => { active = false }
+    }
+    const query = { limit: DASHBOARD_MAX_ROWS, project_id: scope.projectId }
+    const headers = { Authorization: 'Bearer ' + scope.token }
+    rest(DASHBOARD_READ_MODEL_PATH, { method: 'GET', query, headers }).then((response) => {
+      const snapshot = validateDashboardSnapshot(response)
+      if (active) setReadModel({ loading: false, snapshot, error: null })
+    }).catch((error) => {
+      if (active) setReadModel({ loading: false, snapshot: null, error: String(error?.message || error) })
+    })
+    return () => { active = false }
+  }, [rest, scope.loading, scope.projectId, scope.token, scope.error])
+
+  React.useLayoutEffect(() => {
+    let active = true
+    cliExec(['decision', 'agent-metrics-snapshot']).then((res) => {
+      if (!active) return
+      if (!res || res.ok === false || !Array.isArray(res.records)) {
+        setWidgets({ loading: false, snapshot: null, error: (res && res.error) || 'agent metrics snapshot is unavailable' })
+        return
+      }
+      setWidgets({ loading: false, snapshot: res, error: null })
+    }).catch((e) => {
+      if (active) setWidgets({ loading: false, snapshot: null, error: String(e.message || e) })
+    })
+    return () => { active = false }
+  }, [])
+
+  return jsxs('section', {
+    'aria-label': 'Agent Dashboard',
+    className: 'flex h-full flex-col gap-4 overflow-auto p-4 text-sm',
+    children: [
+      jsxs('div', {
+        'data-dashboard-section': 'read-model',
+        children: [
+          jsx('div', { className: 'font-medium', children: 'Dashboard' }),
+          readModel.loading ? jsx(DashboardLoadingState, {}) : readModel.error ? jsx(DashboardMessageState, { children: `Dashboard unavailable: ${readModel.error}` }) : jsx(AgentMetricsPageBody, { snapshot: readModel.snapshot }),
+        ],
+      }),
+      jsx(Separator, {}),
+      jsxs('div', {
+        'data-dashboard-section': 'agent-matrix',
+        children: [
+          jsx('div', { className: 'font-medium', children: 'Agent Matrix' }),
+          widgets.loading ? jsx(DashboardLoadingState, {}) : widgets.error ? jsx(DashboardMessageState, { children: `Agent metrics unavailable: ${widgets.error}` }) : jsx(AgentMetricsWidgetsBody, { snapshot: widgets.snapshot }),
+        ],
+      }),
+    ],
+  })
+}
+// --- End Agent Dashboard ---------------------------------------------------
+
 function useKanbanBoards() {
   // Kanban boards are a wholly separate concept from decision-hud "projects"
   // (see BoardSelector below) — this only lists them for the selector UI,
@@ -5342,6 +5427,28 @@ export default {
         area: SIDEBAR_NAV_AREA,
         order: 40,
         data: { codicon: 'checklist', label: 'Decision HUD', path: '/decision-hud' },
+      },
+      {
+        id: 'agent-dashboard-route',
+        area: ROUTES_AREA,
+        data: { path: AGENT_DASHBOARD_ROUTE_PATH },
+        render: () => jsx(AgentDashboardCombinedPage, { rest: ctx.rest }),
+      },
+      {
+        id: 'agent-dashboard-nav',
+        area: SIDEBAR_NAV_AREA,
+        order: 44,
+        data: { codicon: 'dashboard', label: 'Agent Dashboard', path: AGENT_DASHBOARD_ROUTE_PATH },
+      },
+      {
+        id: 'agent-dashboard-open',
+        area: PALETTE_AREA,
+        data: {
+          id: 'decision-hud.agent-dashboard',
+          label: 'Agent Dashboard: Open page',
+          keywords: ['agent', 'dashboard', 'metrics', 'matrix'],
+          run: () => host.navigate(AGENT_DASHBOARD_ROUTE_PATH),
+        },
       },
       {
         id: 'agent-metrics-route',
