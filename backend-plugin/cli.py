@@ -701,6 +701,13 @@ _SETTINGS_KEYS = {
         {"metric": "todo", "enabled": True},
         {"metric": "blocked", "enabled": True},
     ]),
+    # Minutes between "decision-hud telemetry checkpoint sync (all boards)"
+    # cron ticks (job id hardcoded in plugin.js's TELEMETRY_SYNC_JOB_ID).
+    # This key only mirrors the value the pane's Settings > Telemetry Sync
+    # tab last successfully applied via `hermes cron edit --schedule` — it
+    # does not itself drive the schedule, so changing it directly here
+    # (bypassing the pane) would desync the display from the real cron job.
+    "telemetry_sync_interval_minutes": "15",
 }
 
 

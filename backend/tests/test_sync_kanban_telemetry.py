@@ -36,13 +36,13 @@ def _module():
         pytest.fail(f"scripts/sync_kanban_telemetry.py is absent: {exc}")
 
 
-def _make_kanban_db(path: Path, *, with_sessions: bool = False) -> None:
+def _make_kanban_db(path: Path, *, with_sessions: bool = False, project_id: str = "p_test123") -> None:
     conn = sqlite3.connect(str(path))
     conn.executescript(
         """
         CREATE TABLE tasks (
             id TEXT PRIMARY KEY, title TEXT, assignee TEXT, status TEXT,
-            session_id TEXT, created_at INTEGER
+            session_id TEXT, created_at INTEGER, project_id TEXT
         );
         CREATE TABLE task_runs (
             id INTEGER PRIMARY KEY AUTOINCREMENT, task_id TEXT NOT NULL,
@@ -57,9 +57,9 @@ def _make_kanban_db(path: Path, *, with_sessions: bool = False) -> None:
     now = int(time.time())
     t1_session = "sess-t1" if with_sessions else None
     t2_session = "sess-t2" if with_sessions else None
-    conn.execute("INSERT INTO tasks VALUES ('t1', 'Task 1', 'builder', 'done', ?, ?)", (t1_session, now))
-    conn.execute("INSERT INTO tasks VALUES ('t2', 'Task 2', 'builder', 'done', ?, ?)", (t2_session, now))
-    conn.execute("INSERT INTO tasks VALUES ('t3', 'Task 3', 'reviewer', 'blocked', NULL, ?)", (now,))
+    conn.execute("INSERT INTO tasks VALUES ('t1', 'Task 1', 'builder', 'done', ?, ?, ?)", (t1_session, now, project_id))
+    conn.execute("INSERT INTO tasks VALUES ('t2', 'Task 2', 'builder', 'done', ?, ?, ?)", (t2_session, now, project_id))
+    conn.execute("INSERT INTO tasks VALUES ('t3', 'Task 3', 'reviewer', 'blocked', NULL, ?, ?)", (now, project_id))
     conn.execute(
         "INSERT INTO task_runs (task_id, profile, status, outcome, started_at, ended_at) VALUES "
         "('t1', 'builder', 'done', 'completed', ?, ?)", (now - 100, now - 50),
@@ -180,7 +180,7 @@ def test_build_checkpoints_empty_db_yields_no_checkpoints(tmp_path):
     conn = sqlite3.connect(str(db_path))
     conn.executescript(
         """
-        CREATE TABLE tasks (id TEXT PRIMARY KEY, title TEXT, assignee TEXT, status TEXT, session_id TEXT, created_at INTEGER);
+        CREATE TABLE tasks (id TEXT PRIMARY KEY, title TEXT, assignee TEXT, status TEXT, session_id TEXT, created_at INTEGER, project_id TEXT);
         CREATE TABLE task_runs (id INTEGER PRIMARY KEY AUTOINCREMENT, task_id TEXT NOT NULL, profile TEXT, status TEXT NOT NULL, outcome TEXT, started_at INTEGER NOT NULL, ended_at INTEGER);
         CREATE TABLE task_links (parent_id TEXT NOT NULL, child_id TEXT NOT NULL);
         """
@@ -205,8 +205,8 @@ async def test_sync_writes_checkpoints_readable_via_public_repository_api(tmp_pa
     mod = _module()
     postgres = importlib.import_module("agent_telemetry.db.postgres")
     db_path = tmp_path / "kanban.db"
-    _make_kanban_db(db_path)
     scope = f"p_synctest_{int(time.time())}"
+    _make_kanban_db(db_path, project_id=scope)
 
     repository = postgres.PostgresMetricsRepository(postgres_url)
     await repository.open()
@@ -224,3 +224,58 @@ async def test_sync_writes_checkpoints_readable_via_public_repository_api(tmp_pa
         assert "crashed_volume" in rows[0].values
     finally:
         await repository.close()
+
+
+def test_build_checkpoints_ignores_project_id_isolation_is_by_file(tmp_path):
+    """Isolation is per-board-file, not a project_id column filter — a task
+    tagged with a different project_id still surfaces if it's in the DB the
+    caller pointed at. discover_board_dbs/resolve_project_ids_by_board are
+    what keep boards from leaking into each other, not this function."""
+    mod = _module()
+    db_path = tmp_path / "kanban.db"
+    _make_kanban_db(db_path, project_id="p_alpha")
+    conn = sqlite3.connect(str(db_path))
+    conn.execute("INSERT INTO tasks VALUES ('t9', 'Other project task', 'other-agent', 'done', NULL, ?, 'p_beta')", (int(time.time()),))
+    conn.execute(
+        "INSERT INTO task_runs (task_id, profile, status, outcome, started_at, ended_at) VALUES "
+        "('t9', 'other-agent', 'done', 'completed', ?, ?)", (int(time.time()) - 10, int(time.time())),
+    )
+    conn.commit()
+    conn.close()
+
+    checkpoints = mod.build_checkpoints(kanban_db_path=str(db_path), scope="p_alpha")
+
+    assert {c["agent_id"] for c in checkpoints} == {"builder", "reviewer", "other-agent"}
+
+
+def test_discover_board_dbs_finds_default_and_named_boards(tmp_path):
+    home = tmp_path / "hermes_home"
+    (home / "kanban" / "boards" / "alpha").mkdir(parents=True)
+    (home / "kanban" / "boards" / "alpha" / "kanban.db").write_bytes(b"x")
+    (home / "kanban" / "boards" / "_archived").mkdir(parents=True)
+    (home / "kanban" / "boards" / "_archived" / "kanban.db").write_bytes(b"x")
+    (home / "kanban" / "boards" / "empty").mkdir(parents=True)
+    (home / "kanban" / "boards" / "empty" / "kanban.db").write_bytes(b"")  # 0 bytes: skip
+    (home / "kanban.db").write_bytes(b"x")
+
+    mod = _module()
+    found = dict(mod.discover_board_dbs(str(home)))
+
+    assert set(found) == {"default", "alpha"}
+    assert found["default"] == str(home / "kanban.db")
+
+
+def test_resolve_project_ids_by_board_reads_projects_db(tmp_path):
+    projects_db = tmp_path / "projects.db"
+    conn = sqlite3.connect(str(projects_db))
+    conn.execute("CREATE TABLE projects (id TEXT, board_slug TEXT, archived INTEGER)")
+    conn.execute("INSERT INTO projects VALUES ('p_1', 'decision-hud', 0)")
+    conn.execute("INSERT INTO projects VALUES ('p_2', 'archived-board', 1)")
+    conn.execute("INSERT INTO projects VALUES ('p_3', NULL, 0)")
+    conn.commit()
+    conn.close()
+
+    mod = _module()
+    result = mod.resolve_project_ids_by_board(str(projects_db))
+
+    assert result == {"decision-hud": "p_1"}

@@ -44,6 +44,13 @@ _ROUTE_PATH = "/decision-hud/agent-dashboard"
 # an authenticated dashboard user), it just isn't used to filter this
 # route's data the way it filters _ROUTE_PATH's.
 _COMPARISON_ROUTE_PATH = "/decision-hud/agent-dashboard/comparison"
+# Wave: per-metric history for the Agent Health bars' percentile/z-score
+# normalization (see DashboardReadModel.metric_history). Sibling route, same
+# auth, reuses the SAME read_model/repository as _ROUTE_PATH — this is a
+# different query shape (one metric's series across a time window instead
+# of "latest row per agent"), not a different data source, so it stays on
+# `read_model` rather than getting its own dependency like `comparison` did.
+_HISTORY_ROUTE_PATH = "/decision-hud/agent-dashboard/history"
 _MAX_LIMIT_DEFAULT = 1000
 _DEFAULT_BASELINE_PATH = "baseline"
 
@@ -95,6 +102,9 @@ def _make_handler(read_model, comparison=None):
             parsed = urlsplit(self.path)
             if parsed.path == _COMPARISON_ROUTE_PATH:
                 self._handle_comparison(parse_qs(parsed.query))
+                return
+            if parsed.path == _HISTORY_ROUTE_PATH:
+                self._handle_history(parse_qs(parsed.query))
                 return
             if parsed.path != _ROUTE_PATH:
                 self._send_json(HTTPStatus.NOT_FOUND, {"error": "not found"})
@@ -164,6 +174,65 @@ def _make_handler(read_model, comparison=None):
                 self._send_json(HTTPStatus.BAD_REQUEST, {"error": str(exc)})
                 return
             self._send_json(HTTPStatus.OK, payload)
+
+        def _handle_history(self, query):
+            """GET /decision-hud/agent-dashboard/history: one metric's series
+            per agent, for Agent Health bar percentile/z-score normalization
+            (DashboardReadModel.metric_history). Project-scoped like
+            _ROUTE_PATH — never the comparison route's cross-scope shape,
+            since history is inherently "this project's agents over time"."""
+            project_ids = query.get("project_id")
+            project_id = project_ids[0] if project_ids else None
+            if not project_id:
+                self._send_json(HTTPStatus.BAD_REQUEST, {"error": "project_id query parameter is required"})
+                return
+            if not self._authenticate(project_id):
+                return
+            metric_keys = query.get("metric_key")
+            metric_key = metric_keys[0] if metric_keys else None
+            if not metric_key:
+                self._send_json(HTTPStatus.BAD_REQUEST, {"error": "metric_key query parameter is required"})
+                return
+            agent_ids = query.get("agent_ids", [])
+            flat_agent_ids = []
+            for raw in agent_ids:
+                flat_agent_ids.extend(part for part in raw.split(",") if part)
+            if not flat_agent_ids:
+                self._send_json(HTTPStatus.BAD_REQUEST, {"error": "agent_ids query parameter is required"})
+                return
+            limit_values = query.get("limit")
+            try:
+                limit = int(limit_values[0]) if limit_values else _MAX_LIMIT_DEFAULT
+            except ValueError:
+                self._send_json(HTTPStatus.BAD_REQUEST, {"error": "limit must be an integer"})
+                return
+            since = None
+            since_values = query.get("since")
+            if since_values:
+                try:
+                    from datetime import datetime
+
+                    since = datetime.fromisoformat(since_values[0].replace("Z", "+00:00"))
+                except ValueError:
+                    self._send_json(HTTPStatus.BAD_REQUEST, {"error": "since must be an ISO-8601 timestamp"})
+                    return
+
+            try:
+                by_agent = _run_async(
+                    read_model.metric_history(
+                        scope=project_id, agent_ids=flat_agent_ids, metric_key=metric_key, since=since, limit=limit,
+                    )
+                )
+            except ValueError as exc:
+                self._send_json(HTTPStatus.BAD_REQUEST, {"error": str(exc)})
+                return
+
+            self._send_json(HTTPStatus.OK, {
+                "schema_version": "agent-dashboard-history.v1",
+                "scope": {"project_id": project_id},
+                "metric_key": metric_key,
+                "series": by_agent,
+            })
 
     return Handler
 

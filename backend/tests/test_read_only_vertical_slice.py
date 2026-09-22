@@ -185,3 +185,65 @@ async def test_list_scope_agent_ids_discovers_reporters_scoped_and_deduped(repos
 
     empty = await repository.list_scope_agent_ids(scope="project:nothing-here")
     assert empty == []
+
+
+@pytest.mark.asyncio
+async def test_metric_history_reuses_query_recent_metrics_no_new_table(repository, contract):
+    """Agent Health's percentile/z-score normalization needs a real time
+    series, not just the latest snapshot. This must come from the EXISTING
+    telemetry_snapshots table (every real sync_kanban_telemetry.py run
+    already writes a fresh, never-updated row per changed Kanban state) —
+    no new table, no new repository method beyond what query_recent_metrics
+    already provides."""
+    _, _, read_model_type = contract
+    now = datetime.now(timezone.utc)
+    await repository.write_checkpoint(_snapshot_payload(key="h1", captured_at=now - timedelta(minutes=10), scope=SCOPE))
+    await repository.write_checkpoint(_snapshot_payload(key="h2", captured_at=now - timedelta(minutes=5), scope=SCOPE))
+    await repository.write_checkpoint(_snapshot_payload(key="h3", captured_at=now, scope=SCOPE))
+
+    model = read_model_type(repository)
+    history = await model.metric_history(scope=SCOPE, agent_ids=["agent-a"], metric_key="token_burn_rate", limit=100)
+
+    assert set(history) == {"agent-a"}
+    points = history["agent-a"]
+    assert len(points) == 3
+    # oldest-first, not query_recent_metrics' native DESC order.
+    assert [p["captured_at"] for p in points] == sorted(p["captured_at"] for p in points)
+    assert all(p["value"] == 12.5 for p in points)
+
+
+@pytest.mark.asyncio
+async def test_metric_history_never_falls_back_across_projects_or_agents(repository, contract):
+    _, _, read_model_type = contract
+    await repository.write_checkpoint(_snapshot_payload(key="other-scope-h", scope=OTHER_SCOPE, agent="agent-a"))
+    model = read_model_type(repository)
+    history = await model.metric_history(scope=SCOPE, agent_ids=["agent-a", "agent-missing"], metric_key="token_burn_rate")
+    assert history == {"agent-a": [], "agent-missing": []}
+
+
+@pytest.mark.asyncio
+async def test_metric_history_omits_points_missing_the_requested_metric(repository, contract):
+    _, _, read_model_type = contract
+    await repository.write_checkpoint(_snapshot_payload(key="no-such-metric"))
+    model = read_model_type(repository)
+    history = await model.metric_history(scope=SCOPE, agent_ids=["agent-a"], metric_key="does_not_exist")
+    assert history == {"agent-a": []}
+
+
+@pytest.mark.asyncio
+async def test_metric_history_respects_since_and_rejects_bad_input(repository, contract):
+    _, _, read_model_type = contract
+    now = datetime.now(timezone.utc)
+    await repository.write_checkpoint(_snapshot_payload(key="old", captured_at=now - timedelta(days=2)))
+    await repository.write_checkpoint(_snapshot_payload(key="new", captured_at=now))
+    model = read_model_type(repository)
+
+    recent_only = await model.metric_history(
+        scope=SCOPE, agent_ids=["agent-a"], metric_key="token_burn_rate", since=now - timedelta(hours=1),
+    )
+    assert len(recent_only["agent-a"]) == 1
+
+    with pytest.raises((ValueError, TypeError)):
+        await model.metric_history(scope=SCOPE, agent_ids=[], metric_key="token_burn_rate")
+    with pytest.raises((ValueError, TypeError)):
+        await model.metric_history(scope=SCOPE, agent_ids=["agent-a"], metric_key="")

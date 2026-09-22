@@ -233,3 +233,96 @@ class TestAuthorizedRequest:
         )
         assert status == 200
         assert all(call["scope"] == SCOPE for call in repository.calls)
+
+
+class _FakeReadModelWithHistory:
+    """Minimal stand-in for DashboardReadModel exposing only metric_history,
+    proving the /history route calls the read model (not the raw
+    repository) and passes through the authenticated project scope."""
+
+    def __init__(self):
+        self.calls = []
+
+    async def metric_history(self, *, scope, agent_ids, metric_key, since=None, limit=500):
+        self.calls.append({
+            "scope": scope, "agent_ids": list(agent_ids), "metric_key": metric_key,
+            "since": since, "limit": limit,
+        })
+        if scope != SCOPE:
+            return {agent_id: [] for agent_id in agent_ids}
+        return {
+            agent_id: [{"captured_at": "2026-09-12T20:00:00+00:00", "value": 3.0}]
+            for agent_id in agent_ids
+        }
+
+
+@pytest.fixture
+def history_server(isolated_hermes_home):
+    _, http_app = _service_modules()
+    read_model = _FakeReadModelWithHistory()
+    srv = http_app.build_server(object(), host="127.0.0.1", port=0, read_model=read_model)
+    thread = http_app.serve_in_thread(srv)
+    try:
+        yield srv, read_model
+    finally:
+        http_app.stop_server(srv, thread)
+
+
+def _history_url(srv, project_id, extra_query=""):
+    port = srv.server_address[1]
+    q = f"project_id={project_id}"
+    if extra_query:
+        q += "&" + extra_query
+    return f"http://127.0.0.1:{port}/decision-hud/agent-dashboard/history?{q}"
+
+
+class TestHistoryRoute:
+    """Agent Health percentile/z-score normalization needs real history, not
+    just the latest snapshot — this route is the new read path for that,
+    reusing the SAME read_model/auth as _ROUTE_PATH (see http_app.py's
+    _HISTORY_ROUTE_PATH docstring: no new data source, no new dependency)."""
+
+    def test_requires_auth(self, history_server):
+        srv, _ = history_server
+        status, body = _get(_history_url(srv, SCOPE, "metric_key=blocked_volume&agent_ids=agent-a"), token=None)
+        assert status == 401
+        assert "error" in body
+
+    def test_requires_metric_key(self, history_server):
+        auth, _ = _service_modules()
+        raw = auth.issue_project_actor_token("tester", SCOPE)
+        srv, _ = history_server
+        status, body = _get(_history_url(srv, SCOPE, "agent_ids=agent-a"), token=raw)
+        assert status == 400
+        assert "error" in body
+
+    def test_requires_agent_ids(self, history_server):
+        auth, _ = _service_modules()
+        raw = auth.issue_project_actor_token("tester", SCOPE)
+        srv, _ = history_server
+        status, body = _get(_history_url(srv, SCOPE, "metric_key=blocked_volume"), token=raw)
+        assert status == 400
+        assert "error" in body
+
+    def test_returns_series_using_authenticated_scope(self, history_server):
+        auth, _ = _service_modules()
+        raw = auth.issue_project_actor_token("tester", SCOPE)
+        srv, read_model = history_server
+        status, body = _get(
+            _history_url(srv, SCOPE, "metric_key=blocked_volume&agent_ids=agent-a,agent-b"), token=raw,
+        )
+        assert status == 200
+        assert body["schema_version"] == "agent-dashboard-history.v1"
+        assert body["metric_key"] == "blocked_volume"
+        assert set(body["series"]) == {"agent-a", "agent-b"}
+        assert body["series"]["agent-a"][0]["value"] == 3.0
+        assert all(call["scope"] == SCOPE for call in read_model.calls)
+
+    def test_cross_project_token_is_403(self, history_server):
+        auth, _ = _service_modules()
+        raw = auth.issue_project_actor_token("tester", OTHER_SCOPE)
+        srv, _ = history_server
+        status, body = _get(
+            _history_url(srv, SCOPE, "metric_key=blocked_volume&agent_ids=agent-a"), token=raw,
+        )
+        assert status == 403

@@ -184,3 +184,61 @@ class DashboardReadModel:
                 metrics = row.values
             agents.append(AgentStatus(agent_id, freshness, metrics))
         return DashboardStatus("dashboard.read-model.v1", scope, agents)
+
+    async def metric_history(self, *, scope: str, agent_ids: Iterable[str], metric_key: str,
+                              since: datetime | None = None, limit: int = 500) -> dict[str, list[dict[str, Any]]]:
+        """Per-agent time series for one metric key, oldest-first.
+
+        Reuses `query_recent_metrics` as-is (it already returns up to `limit`
+        checkpoints per call, not just the latest — `status()` above is what
+        collapses that down to one row per agent, not the repository) so this
+        needs no new table, no new repository method, and no new migration:
+        every `sync_kanban_telemetry.py` run already writes a fresh,
+        never-updated checkpoint row per (scope, assignee) when Kanban state
+        actually changed (idempotency_key includes the Kanban DB's mtime), so
+        the existing `telemetry_snapshots` table already IS the history.
+        `backfill_kanban_telemetry.py` seeds the pre-cron past the same way.
+
+        Returns `{agent_id: [{"captured_at": iso_str, "value": number}, ...]}`
+        oldest-first per agent, feedable straight into a client-side
+        percentile/z-score computation (see plugin.js's
+        agentHealthMetricStats/agentHealthBarPct) — this method does no
+        statistics itself, just projects the raw series so callers can choose
+        their own window/normalization without a second round trip.
+        """
+        if not isinstance(metric_key, str) or not metric_key:
+            raise ValueError("metric_key is required")
+        ids = list(agent_ids)
+        if not ids or len(ids) > self.max_limit or not all(isinstance(x, str) and x for x in ids):
+            raise ValueError("agent_ids must be bounded non-empty strings")
+        if type(limit) is not int or limit < 1 or limit > self.max_limit:
+            raise ValueError(f"limit must be between 1 and {self.max_limit}")
+        try:
+            rows = await self.repository.query_recent_metrics(scope=scope, agent_ids=ids, limit=limit)
+        except ValueError:
+            raise
+        except Exception:
+            # Same "unavailable, never fabricate" contract as status(): a
+            # Postgres outage returns no history for any agent, not partial
+            # or stale-looking data.
+            return {agent_id: [] for agent_id in ids}
+        by_agent: dict[str, list[dict[str, Any]]] = {agent_id: [] for agent_id in ids}
+        for row in rows:
+            if row.agent_id not in by_agent:
+                continue
+            if since is not None:
+                observed = datetime.fromisoformat(row.captured_at.replace("Z", "+00:00"))
+                if observed.tzinfo is None:
+                    observed = observed.replace(tzinfo=timezone.utc)
+                if observed < since:
+                    continue
+            value = row.values.get(metric_key)
+            if value is None:
+                continue
+            raw = value.raw_value
+            if not isinstance(raw, (int, float)) or isinstance(raw, bool):
+                continue  # a bar/stat needs a real magnitude, same guard as useAgentTelemetryMetrics
+            by_agent[row.agent_id].append({"captured_at": row.captured_at, "value": raw})
+        for agent_id, points in by_agent.items():
+            points.sort(key=lambda p: p["captured_at"])  # query_recent_metrics is DESC; callers want oldest-first
+        return by_agent

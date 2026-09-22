@@ -32,6 +32,8 @@ from uuid import NAMESPACE_URL, uuid5
 
 DEFAULT_KANBAN_DB = str(Path.home() / ".hermes" / "kanban.db")
 DEFAULT_STATE_DB = str(Path.home() / ".hermes" / "state.db")
+DEFAULT_KANBAN_HOME = str(Path.home() / ".hermes")
+DEFAULT_PROJECTS_DB = str(Path.home() / ".hermes" / "projects.db")
 
 # Outcome -> display category, matching AGENT_METRICS_CATEGORY_LABELS in
 # plugin.js (task_outcome_quality is the one category key that map already
@@ -78,7 +80,16 @@ def _session_usage_by_task(conn: sqlite3.Connection, state_db_path: Optional[str
 def build_checkpoints(
     *, kanban_db_path: str = DEFAULT_KANBAN_DB, state_db_path: Optional[str] = DEFAULT_STATE_DB, scope: str,
 ) -> list[dict]:
-    """Return a list of telemetry.v1 MetricSnapshot payload dicts, one per assignee."""
+    """Return a list of telemetry.v1 MetricSnapshot payload dicts, one per assignee.
+
+    No project_id filtering: isolation is the CALLER's job — pass the ONE
+    board's own kanban.db (see discover_board_dbs/DEFAULT_KANBAN_DB), never a
+    shared multi-board file. Hermes kanban boards are already isolated at the
+    filesystem level (one sqlite file per board; `default` lives at
+    <home>/kanban.db, every other board at <home>/kanban/boards/<slug>/kanban.db)
+    — a project_id column filter would be solving an isolation problem this
+    layout doesn't have.
+    """
     if not isinstance(scope, str) or not scope:
         raise ValueError("scope is required")
 
@@ -198,6 +209,47 @@ def build_checkpoints(
     return checkpoints
 
 
+def discover_board_dbs(kanban_home: str) -> list[tuple[str, str]]:
+    """``[(board_slug, kanban_db_path), ...]`` for every board that actually
+    has a kanban.db on disk: ``default`` lives at ``<home>/kanban.db`` (an
+    exception baked into hermes_cli/kanban_db.py's boards_root()), every
+    other board at ``<home>/kanban/boards/<slug>/kanban.db``.
+    """
+    home = Path(kanban_home)
+    found: list[tuple[str, str]] = []
+    default_db = home / "kanban.db"
+    if default_db.exists():
+        found.append(("default", str(default_db)))
+    boards_root = home / "kanban" / "boards"
+    if boards_root.is_dir():
+        for board_dir in sorted(boards_root.iterdir()):
+            if board_dir.name.startswith("_"):  # e.g. _archived
+                continue
+            db_path = board_dir / "kanban.db"
+            if db_path.exists() and db_path.stat().st_size > 0:
+                found.append((board_dir.name, str(db_path)))
+    return found
+
+
+def resolve_project_ids_by_board(projects_db_path: str) -> dict[str, str]:
+    """``{board_slug: project_id}`` for every non-archived project that has a
+    board_slug, read from Hermes's projects.db (same one decision-hud's own
+    project picker reads). A board with no matching project is skipped by
+    the caller, not defaulted to some made-up scope.
+    """
+    if not Path(projects_db_path).exists():
+        return {}
+    conn = sqlite3.connect(f"file:{projects_db_path}?mode=ro", uri=True)
+    conn.row_factory = sqlite3.Row
+    try:
+        rows = conn.execute(
+            "SELECT id, board_slug FROM projects WHERE board_slug IS NOT NULL AND archived = 0"
+        ).fetchall()
+        return {row["board_slug"]: row["id"] for row in rows}
+    finally:
+        conn.close()
+
+
 async def sync(
     *, kanban_db_path: str = DEFAULT_KANBAN_DB, state_db_path: Optional[str] = DEFAULT_STATE_DB,
     scope: str, repository,
@@ -215,14 +267,22 @@ async def sync(
 
 def main(argv: Optional[list[str]] = None) -> None:
     parser = argparse.ArgumentParser(description="Sync real Kanban agent telemetry into the Postgres dashboard read model.")
-    parser.add_argument("--kanban-db", default=DEFAULT_KANBAN_DB)
+    parser.add_argument("--kanban-db", default=DEFAULT_KANBAN_DB, help="single-board mode: path to that board's kanban.db")
     parser.add_argument("--state-db", default=DEFAULT_STATE_DB, help="Hermes state.db (token/cost/latency source)")
-    parser.add_argument("--scope", required=True, help="decision-hud project_id to scope these checkpoints to")
+    parser.add_argument("--scope", help="decision-hud project_id to scope these checkpoints to (single-board mode)")
+    parser.add_argument(
+        "--all-boards", action="store_true",
+        help="sync every Hermes kanban board that maps to a decision-hud project, each from its OWN kanban.db",
+    )
+    parser.add_argument("--kanban-home", default=DEFAULT_KANBAN_HOME, help="--all-boards: Hermes home (parent of kanban.db / kanban/boards/)")
+    parser.add_argument("--projects-db", default=DEFAULT_PROJECTS_DB, help="--all-boards: projects.db mapping board_slug -> project_id")
     parser.add_argument(
         "--database-url",
         default=os.environ.get("DASHBOARD_DATABASE_URL", "postgresql://dashboard:dashboard@127.0.0.1:55432/dashboard"),
     )
     args = parser.parse_args(argv)
+    if bool(args.scope) == bool(args.all_boards):
+        parser.error("pass exactly one of --scope or --all-boards")
 
     # Late import: keeps build_checkpoints() importable/testable without a
     # psycopg install for the pure-function unit tests above.
@@ -233,10 +293,29 @@ def main(argv: Optional[list[str]] = None) -> None:
         await repository.open()
         try:
             await repository.migrate()
-            written = await sync(
-                kanban_db_path=args.kanban_db, state_db_path=args.state_db, scope=args.scope, repository=repository,
-            )
-            print(f"synced {written} agent checkpoint(s) into scope={args.scope!r}")
+            if args.all_boards:
+                project_id_by_board = resolve_project_ids_by_board(args.projects_db)
+                for slug, db_path in discover_board_dbs(args.kanban_home):
+                    scope = project_id_by_board.get(slug)
+                    if not scope:
+                        print(f"skipped board={slug!r}: no matching decision-hud project (board_slug not found in projects.db)")
+                        continue
+                    try:
+                        written = await sync(
+                            kanban_db_path=db_path, state_db_path=args.state_db, scope=scope, repository=repository,
+                        )
+                    except sqlite3.OperationalError as exc:
+                        # ponytail: skip, don't crash the whole run — a board
+                        # DB predating the task_runs schema has nothing to
+                        # sync yet, that's not an error in the other boards.
+                        print(f"skipped board={slug!r} scope={scope!r}: {exc}")
+                        continue
+                    print(f"synced {written} agent checkpoint(s) from board={slug!r} into scope={scope!r}")
+            else:
+                written = await sync(
+                    kanban_db_path=args.kanban_db, state_db_path=args.state_db, scope=args.scope, repository=repository,
+                )
+                print(f"synced {written} agent checkpoint(s) into scope={args.scope!r}")
         finally:
             await repository.close()
 

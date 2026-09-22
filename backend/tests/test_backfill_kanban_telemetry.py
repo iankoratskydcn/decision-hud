@@ -24,7 +24,7 @@ def _make_kanban_db(path: Path) -> None:
         """
         CREATE TABLE tasks (
             id TEXT PRIMARY KEY, title TEXT, assignee TEXT, status TEXT,
-            session_id TEXT, created_at INTEGER
+            session_id TEXT, created_at INTEGER, project_id TEXT
         );
         CREATE TABLE task_runs (
             id INTEGER PRIMARY KEY AUTOINCREMENT, task_id TEXT NOT NULL,
@@ -36,9 +36,9 @@ def _make_kanban_db(path: Path) -> None:
     now = int(time.time())
     day_ago = now - 86400
     two_days_ago = now - 2 * 86400
-    conn.execute("INSERT INTO tasks VALUES ('t1', 'Task 1', 'builder', 'done', NULL, ?)", (now,))
-    conn.execute("INSERT INTO tasks VALUES ('t2', 'Task 2', 'builder', 'done', NULL, ?)", (now,))
-    conn.execute("INSERT INTO tasks VALUES ('t3', 'Task 3', 'reviewer', 'blocked', NULL, ?)", (now,))
+    conn.execute("INSERT INTO tasks VALUES ('t1', 'Task 1', 'builder', 'done', NULL, ?, 'p_test123')", (now,))
+    conn.execute("INSERT INTO tasks VALUES ('t2', 'Task 2', 'builder', 'done', NULL, ?, 'p_test123')", (now,))
+    conn.execute("INSERT INTO tasks VALUES ('t3', 'Task 3', 'reviewer', 'blocked', NULL, ?, 'p_test123')", (now,))
     # Oldest run (two days ago) -> builder completed.
     conn.execute(
         "INSERT INTO task_runs (task_id, profile, status, outcome, started_at, ended_at) VALUES "

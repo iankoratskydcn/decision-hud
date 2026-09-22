@@ -4529,6 +4529,51 @@ function useKanbanEscalationScope() {
   return { ...state, refresh, save }
 }
 
+// useTelemetrySyncInterval: configurable interval for the
+// "decision-hud telemetry checkpoint sync (all boards)" cron job
+// (~/.hermes/scripts/sync-decision-hud-telemetry.sh, see
+// backend/scripts/sync_kanban_telemetry.py --all-boards). Two things have
+// to move together on save: the job's actual `hermes cron edit --schedule`
+// (what makes it really run more/less often) AND a settings-set record of
+// the chosen minutes (what lets this tab show the current value back
+// without re-parsing cron's free-text schedule string). The job_id is
+// fixed/hardcoded — this is the one recurring sync job this plugin owns,
+// same as BoardSettingsPanel hardcoding its `kanban boards` CLI shape.
+const TELEMETRY_SYNC_JOB_ID = '25f76e363778'
+const TELEMETRY_SYNC_JOB_NAME = 'decision-hud telemetry checkpoint sync (all boards)'
+const TELEMETRY_SYNC_INTERVAL_OPTIONS = [1, 5, 10, 15, 30, 60]
+const TELEMETRY_SYNC_INTERVAL_DEFAULT = 15
+
+function useTelemetrySyncInterval() {
+  const [state, setState] = React.useState({ loading: true, minutes: TELEMETRY_SYNC_INTERVAL_DEFAULT, error: null })
+  const refresh = React.useCallback(async () => {
+    setState((s) => ({ ...s, loading: true, error: null }))
+    try {
+      const res = await cliExec(['decision', 'settings-get'])
+      const s = (res && res.settings) || {}
+      const parsed = parseInt(s.telemetry_sync_interval_minutes, 10)
+      setState({
+        loading: false,
+        minutes: Number.isFinite(parsed) && parsed > 0 ? parsed : TELEMETRY_SYNC_INTERVAL_DEFAULT,
+        error: null,
+      })
+    } catch (e) {
+      setState((s) => ({ ...s, loading: false, error: String(e.message || e) }))
+    }
+  }, [])
+  React.useEffect(() => { refresh() }, [refresh])
+  const save = React.useCallback(async (minutes) => {
+    // Order matters for a failure mid-way: apply the real schedule change
+    // FIRST, only persist the displayed value once cron actually accepted
+    // it — an early settings-set would show a minutes value the job isn't
+    // really running at.
+    await cliExec(['cron', 'edit', TELEMETRY_SYNC_JOB_ID, '--schedule', `every ${minutes}m`])
+    await cliExec(['decision', 'settings-set', 'telemetry_sync_interval_minutes', String(minutes)])
+    setState((s) => ({ ...s, minutes }))
+  }, [])
+  return { ...state, refresh, save }
+}
+
 const KANBAN_ESCALATION_SCOPE_OPTIONS = [
   { value: 'off', label: 'Off', description: 'Never auto-push a Decision HUD card from kanban_block/kanban_request_review.' },
   { value: 'needs_input', label: 'Needs input only', description: "Only genuine owner decisions (kanban_block kind='needs_input'). Excludes capability/transient/dependency blocks — those are status, not decisions." },
@@ -4671,6 +4716,58 @@ function KanbanEscalationScopeTab() {
         ),
       }),
       jsx(KanbanProfileHooksExemptSection, {}),
+    ],
+  })
+}
+
+function TelemetrySyncIntervalTab() {
+  const { loading, minutes, error, save } = useTelemetrySyncInterval()
+  const [saving, setSaving] = React.useState(false)
+
+  const handleSelect = React.useCallback(async (value) => {
+    if (value === minutes) return
+    setSaving(true)
+    try {
+      await save(value)
+      host.notify({ kind: 'success', message: `Telemetry sync interval set to every ${value}m` })
+    } catch (e) {
+      host.notify({ kind: 'error', message: String(e.message || e) })
+    } finally {
+      setSaving(false)
+    }
+  }, [minutes, save])
+
+  return jsxs('section', {
+    className: 'flex flex-col gap-2',
+    children: [
+      jsx('div', { className: 'text-sm font-medium', children: 'Telemetry sync interval' }),
+      jsx('p', {
+        className: 'text-[0.8rem] text-(--ui-text-secondary)',
+        children:
+          `How often the "${TELEMETRY_SYNC_JOB_NAME}" cron job writes a fresh Agent Health checkpoint into Postgres. Shorter intervals give a more detailed history/percentile/z-score view sooner, at the cost of more frequent writes.`,
+      }),
+      error ? jsx('div', { className: 'text-[0.75rem] text-(--ui-danger,#e5484d)', children: error }) : null,
+      jsx('div', {
+        className: 'flex flex-col gap-1',
+        children: TELEMETRY_SYNC_INTERVAL_OPTIONS.map((value) =>
+          jsxs('label', {
+            key: value,
+            className: 'flex items-start gap-2 rounded border border-(--ui-stroke-secondary) p-2 text-[0.8rem]',
+            children: [
+              jsx('input', {
+                type: 'radio',
+                name: 'telemetry-sync-interval',
+                value: String(value),
+                checked: minutes === value,
+                disabled: loading || saving,
+                onChange: () => handleSelect(value),
+                className: 'mt-0.5',
+              }),
+              jsx('span', { className: 'font-medium', children: `Every ${value} minute${value === 1 ? '' : 's'}` }),
+            ],
+          })
+        ),
+      }),
     ],
   })
 }
@@ -4897,6 +4994,12 @@ function SettingsFullscreen({ isOpen, onClose, layout, onGridChange, sidebarSett
                   className: `rounded px-2 py-1.5 text-left text-[0.8rem] ${activeTab === 'kanban-escalation' ? 'bg-(--chrome-action-hover) text-foreground' : 'text-(--ui-text-tertiary) hover:bg-(--chrome-action-hover)'}`,
                   children: 'Kanban Escalation',
                 }),
+                jsx('button', {
+                  type: 'button',
+                  onClick: () => setActiveTab('telemetry-sync'),
+                  className: `rounded px-2 py-1.5 text-left text-[0.8rem] ${activeTab === 'telemetry-sync' ? 'bg-(--chrome-action-hover) text-foreground' : 'text-(--ui-text-tertiary) hover:bg-(--chrome-action-hover)'}`,
+                  children: 'Telemetry Sync',
+                }),
               ],
             }),
             jsx('div', {
@@ -4905,6 +5008,8 @@ function SettingsFullscreen({ isOpen, onClose, layout, onGridChange, sidebarSett
                 ? jsx(SubagentRulesTab, { availableMetrics })
                 : activeTab === 'kanban-escalation'
                 ? jsx(KanbanEscalationScopeTab, {})
+                : activeTab === 'telemetry-sync'
+                ? jsx(TelemetrySyncIntervalTab, {})
                 : jsxs('section', {
                     className: 'flex flex-col gap-3',
                     children: [
@@ -4999,19 +5104,13 @@ function useHudMetrics(decisions, boards) {
 // running-task count descending, as tie-break. See
 // decision-hub-integration/research-composite-health-score-agent4.md for the
 // future EWMA composite design — not implemented here.
-// useAgentTelemetryMetrics: real per-agent Agent Metrics telemetry (the same
-// Postgres-backed read model AgentDashboard/AgentMetricsPage render), scoped
-// to the given projectId. Metric keys are whatever the telemetry pipeline
-// has actually emitted for this project — no hardcoded vocabulary — so the
-// health-bar picker below always reflects real available metrics, never a
-// guessed list. Requires a project-scoped actor token (same
-// `hermes decision issue-token --project-id` mint AgentDashboard uses);
-// returns per-agent metric maps plus the sorted list of distinct metric keys
-// seen across all agents.
-function useAgentTelemetryMetrics(projectId, rest) {
-  const [state, setState] = React.useState({ byAgent: {}, metricKeys: [], loading: true, error: null })
+// useProjectActorToken: mint (and remint on projectId change) a
+// project-scoped actor token via the same `hermes decision issue-token`
+// CLI path AgentDashboard/useAgentTelemetryMetrics already use. Extracted
+// so useAgentHealthHistoryStats below can share one token-minting flow
+// instead of a second copy of this same effect.
+function useProjectActorToken(projectId) {
   const [token, setToken] = React.useState(null)
-
   React.useEffect(() => {
     let active = true
     if (!projectId) {
@@ -5023,6 +5122,21 @@ function useAgentTelemetryMetrics(projectId, rest) {
       .catch(() => { if (active) setToken(null) })
     return () => { active = false }
   }, [projectId])
+  return token
+}
+
+// useAgentTelemetryMetrics: real per-agent Agent Metrics telemetry (the same
+// Postgres-backed read model AgentDashboard/AgentMetricsPage render), scoped
+// to the given projectId. Metric keys are whatever the telemetry pipeline
+// has actually emitted for this project — no hardcoded vocabulary — so the
+// health-bar picker below always reflects real available metrics, never a
+// guessed list. Requires a project-scoped actor token (same
+// `hermes decision issue-token --project-id` mint AgentDashboard uses);
+// returns per-agent metric maps plus the sorted list of distinct metric keys
+// seen across all agents.
+function useAgentTelemetryMetrics(projectId, rest) {
+  const [state, setState] = React.useState({ byAgent: {}, metricKeys: [], loading: true, error: null })
+  const token = useProjectActorToken(projectId)
 
   const refresh = React.useCallback(async () => {
     if (!projectId || !token || typeof rest !== 'function') {
@@ -5057,6 +5171,84 @@ function useAgentTelemetryMetrics(projectId, rest) {
   }, [refresh])
 
   return { ...state, refresh }
+}
+
+// HISTORY_REST_PATH: sibling of DASHBOARD_READ_MODEL_PATH (see
+// http_app.py's _HISTORY_ROUTE_PATH) — one metric's real time series per
+// agent, backed by the SAME telemetry_snapshots table every
+// sync_kanban_telemetry.py run already writes to (no new store; see the
+// owner's "check what we already have" note). Used only to sharpen
+// AgentHealthCard's percentile/z-score bars against real history instead of
+// the on-screen snapshot; the 'max' mode still uses the snapshot, since it's
+// inherently a "relative to what's visible right now" measure.
+const HISTORY_REST_PATH = '/agent-dashboard/history'
+const AGENT_HEALTH_HISTORY_WINDOW_DAYS = 30
+
+// agentHealthStatsFromPoints: same {values, n, max, mean, stdev} shape as
+// agentHealthMetricStats, but built from a flat list of historical raw
+// values across ALL agents for one metric — the actual distribution over
+// time percentile/z-score are meant to compare against, not just today's
+// per-agent snapshot.
+function agentHealthStatsFromPoints(values) {
+  const sorted = [...values].sort((a, b) => a - b)
+  const n = sorted.length
+  const max = n > 0 ? Math.max(...sorted) : 0
+  const mean = n > 0 ? sorted.reduce((s, v) => s + v, 0) / n : 0
+  const variance = n > 0 ? sorted.reduce((s, v) => s + (v - mean) ** 2, 0) / n : 0
+  return { values: sorted, n, max, mean, stdev: Math.sqrt(variance) }
+}
+
+// useAgentHealthHistoryStats: fetch real history for whichever metric keys
+// the three configured health bars use (percentile/zscore modes only — see
+// AGENT_HEALTH_NORMALIZE_MODES) and reduce it to the same stats shape
+// agentHealthMetricStats already produces from the on-screen snapshot.
+// Returns {} for any metric with no/unreachable history so callers fall
+// back to the on-screen-snapshot stats already computed in AgentHealthList,
+// never blocking the bars on this fetch succeeding.
+function useAgentHealthHistoryStats(projectId, rest, agentIds, metricKeys) {
+  const [statsByMetric, setStatsByMetric] = React.useState({})
+  const token = useProjectActorToken(projectId)
+  const keysSignature = metricKeys.join(',')
+  const agentIdsSignature = agentIds.join(',')
+
+  const refresh = React.useCallback(async () => {
+    if (!projectId || !token || typeof rest !== 'function' || !keysSignature || !agentIdsSignature) {
+      setStatsByMetric({})
+      return
+    }
+    const since = new Date(Date.now() - AGENT_HEALTH_HISTORY_WINDOW_DAYS * 86400 * 1000).toISOString()
+    const headers = { Authorization: `Bearer ${token}` }
+    const next = {}
+    for (const metricKey of keysSignature.split(',')) {
+      try {
+        const query = { project_id: projectId, metric_key: metricKey, agent_ids: agentIdsSignature, since }
+        const response = await rest(HISTORY_REST_PATH, { method: 'GET', query, headers })
+        if (!isDashboardRecord(response) || response.schema_version !== 'agent-dashboard-history.v1') continue
+        const series = response.series
+        if (!isDashboardRecord(series)) continue
+        const values = []
+        for (const points of Object.values(series)) {
+          if (!Array.isArray(points)) continue
+          for (const point of points) {
+            if (isDashboardRecord(point) && dashboardFiniteNumber(point.value)) values.push(point.value)
+          }
+        }
+        if (values.length > 0) next[metricKey] = agentHealthStatsFromPoints(values)
+      } catch {
+        // Leave this metric's stats absent — callers fall back to the
+        // on-screen-snapshot stats, never a broken/blank bar.
+      }
+    }
+    setStatsByMetric(next)
+  }, [projectId, token, rest, keysSignature, agentIdsSignature])
+
+  React.useEffect(() => {
+    refresh()
+    const id = setInterval(refresh, POLL_MS)
+    return () => clearInterval(id)
+  }, [refresh])
+
+  return statsByMetric
 }
 
 function useAgentHealth(telemetryByAgent) {
@@ -5391,10 +5583,13 @@ function AgentHealthCard({ agent, bars, statsByMetric }) {
 // sorted unhealthiest-first (see useAgentHealth). Honest empty/neutral
 // states instead of a fabricated ranking, matching the "n/a" / "no pending
 // rows" convention used elsewhere in this sidebar.
-function AgentHealthList({ health, availableMetrics }) {
+function AgentHealthList({ health, availableMetrics, projectId, rest }) {
   const { agents, loading, error } = health
   const metrics = availableMetrics && availableMetrics.length > 0 ? availableMetrics : FALLBACK_AGENT_HEALTH_METRICS
   const { bars } = useAgentHealthBarSettings(metrics)
+  const barMetricKeys = React.useMemo(() => [...new Set(bars.map((b) => b.metric))], [bars])
+  const agentIds = React.useMemo(() => agents.map((a) => a.name), [agents])
+  const historyStatsByMetric = useAgentHealthHistoryStats(projectId, rest, agentIds, barMetricKeys)
 
   if (error) {
     return jsx('div', {
@@ -5416,9 +5611,18 @@ function AgentHealthList({ health, availableMetrics }) {
   }
 
   const anyData = agents.some((a) => a.hasData)
+  // Real history (see useAgentHealthHistoryStats) wins when it exists for a
+  // metric — that's what percentile/z-score are meant to measure against
+  // (an actual distribution over time, not just today's on-screen agents).
+  // The on-screen-snapshot stats remain the fallback for a metric with no
+  // history yet (new project, telemetry pipeline not synced) and are always
+  // what 'max' mode uses, since "max of what's visible" is itself the point
+  // of that mode.
   const statsByMetric = {}
   for (const bar of bars) {
-    statsByMetric[bar.metric] = agentHealthMetricStats(agents, bar.metric)
+    const snapshotStats = agentHealthMetricStats(agents, bar.metric)
+    const useHistory = bar.normalize !== 'max' && historyStatsByMetric[bar.metric]
+    statsByMetric[bar.metric] = useHistory || snapshotStats
   }
 
   return jsxs('div', {
@@ -5462,12 +5666,12 @@ function MetricDial({ label, value, min, max, unit, subtitle }) {
 // implementation of that slot, not a further placeholder. Side (left/right)
 // and width are now user-configurable settings instead of a hardcoded
 // left-only w-1/4/max-w-[200px] class.
-function MetricsSidebar({ agentHealth, side, widthPx, availableMetrics }) {
+function MetricsSidebar({ agentHealth, side, widthPx, availableMetrics, projectId, rest }) {
   const borderClass = side === 'right' ? 'border-l pl-3' : 'border-r pr-3'
   return jsx('div', {
     className: `flex shrink-0 flex-col gap-3 overflow-y-auto border-(--ui-stroke-secondary) ${borderClass}`,
     style: { width: `${widthPx}px`, maxWidth: `${widthPx}px` },
-    children: jsx(AgentHealthList, { health: agentHealth, availableMetrics }),
+    children: jsx(AgentHealthList, { health: agentHealth, availableMetrics, projectId, rest }),
   })
 }
 
@@ -5682,6 +5886,7 @@ function DecisionHudPane({ rest }) {
     agentHealth,
     side: safeSidebarSettings.side, widthPx: safeSidebarSettings.widthPx,
     availableMetrics,
+    projectId: selectedBoardProjectId, rest,
   })
   const mainColumn = jsxs('div', {
     className: 'relative flex min-w-0 flex-1 flex-col gap-3',

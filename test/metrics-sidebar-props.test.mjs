@@ -20,8 +20,8 @@ assert.match(
 
 assert.match(
   source,
-  /jsx\(AgentHealthList,\s*\{\s*health:\s*agentHealth,\s*availableMetrics\s*\}\)/,
-  'MetricsSidebar must still render AgentHealthList fed by the (now-destructured) agentHealth prop',
+  /jsx\(AgentHealthList,\s*\{\s*health:\s*agentHealth,\s*availableMetrics,\s*projectId,\s*rest\s*\}\)/,
+  'MetricsSidebar must still render AgentHealthList fed by the (now-destructured) agentHealth prop, plus projectId/rest for real-history normalization',
 )
 
 console.log('metrics-sidebar-props (agentHealth destructure) regression test passed')
