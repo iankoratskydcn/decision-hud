@@ -36,6 +36,7 @@ from scripts.sync_kanban_telemetry import (
     DEFAULT_STATE_DB,
     _OUTCOME_CATEGORY,
     _connect_readonly,
+    payload_fingerprint,
 )
 
 _HISTORY_META_CATEGORY = "producer_history_meta"
@@ -114,7 +115,9 @@ def build_backfill_checkpoints(
                     "raw_value": occurred_at, "value_type": "timestamp", "unit": "iso8601",
                     "category": _HISTORY_META_CATEGORY,
                 }
-            idempotency_key = hashlib.sha256(f"kanban-backfill:{scope}:{assignee}:{day}".encode()).hexdigest()
+            idempotency_key = hashlib.sha256(
+                f"kanban-backfill:{scope}:{assignee}:{day}:{payload_fingerprint(values, occurred_at)}".encode()
+            ).hexdigest()
             deterministic_uuid = uuid5(NAMESPACE_URL, f"decision-hud-backfill:{idempotency_key}")
             checkpoints.append({
                 "schema_version": "telemetry.v1",
@@ -155,7 +158,7 @@ def main(argv: Optional[list[str]] = None) -> None:
     parser.add_argument("--scope", required=True, help="decision-hud project_id to scope these checkpoints to")
     parser.add_argument(
         "--database-url",
-        default=os.environ.get("DASHBOARD_DATABASE_URL", "postgresql://dashboard:***@127.0.0.1:55432/dashboard"),
+        default=os.environ.get("DASHBOARD_DATABASE_URL", "postgresql://dashboard:dashboard@127.0.0.1:55432/dashboard"),
     )
     args = parser.parse_args(argv)
 

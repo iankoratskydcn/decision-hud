@@ -279,3 +279,53 @@ def test_resolve_project_ids_by_board_reads_projects_db(tmp_path):
     result = mod.resolve_project_ids_by_board(str(projects_db))
 
     assert result == {"decision-hud": "p_1"}
+
+
+def test_build_checkpoints_same_kanban_mtime_different_content_gets_distinct_key(tmp_path):
+    """Regression guard for the crash-loop incident: two builds against a
+    kanban.db with the SAME (int-truncated) mtime but genuinely different
+    task_runs content must NOT collide on idempotency_key. Reproduces the
+    real failure mode (filesystem mtime granularity / a second data source
+    changing independently) without needing to fake a filesystem clock —
+    the fingerprint is content-addressed, so identical mtime is irrelevant
+    by construction."""
+    mod = _module()
+    db_path = tmp_path / "kanban.db"
+    _make_kanban_db(db_path, project_id="p_test123")
+
+    first = mod.build_checkpoints(kanban_db_path=str(db_path), scope="p_test123")
+    first_by_agent = {c["agent_id"]: c["idempotency_key"] for c in first}
+
+    # Add a new outcome row WITHOUT touching the file's mtime artificially —
+    # os-level write naturally may or may not bump mtime within the same
+    # second; the point is the key must depend on content, not mtime.
+    conn = sqlite3.connect(str(db_path))
+    conn.execute(
+        "INSERT INTO tasks VALUES ('t99', 'Another task', 'builder', 'done', NULL, ?, 'p_test123')",
+        (int(time.time()),),
+    )
+    conn.execute(
+        "INSERT INTO task_runs (task_id, profile, status, outcome, started_at, ended_at) VALUES "
+        "('t99', 'builder', 'done', 'completed', ?, ?)", (int(time.time()) - 5, int(time.time())),
+    )
+    conn.commit()
+    conn.close()
+
+    second = mod.build_checkpoints(kanban_db_path=str(db_path), scope="p_test123")
+    second_by_agent = {c["agent_id"]: c["idempotency_key"] for c in second}
+
+    assert first_by_agent["builder"] != second_by_agent["builder"], (
+        "idempotency_key did not change when task_runs content changed for the same "
+        "agent -- this is the exact bug class that crashed the telemetry sync cron"
+    )
+
+
+def test_payload_fingerprint_is_order_independent_and_content_sensitive():
+    mod = _module()
+    a = {"x": 1, "y": 2}
+    b = {"y": 2, "x": 1}  # same content, different insertion order
+    c = {"x": 1, "y": 3}  # different content
+
+    assert mod.payload_fingerprint(a, "2026-01-01T00:00:00Z") == mod.payload_fingerprint(b, "2026-01-01T00:00:00Z")
+    assert mod.payload_fingerprint(a, "2026-01-01T00:00:00Z") != mod.payload_fingerprint(c, "2026-01-01T00:00:00Z")
+    assert mod.payload_fingerprint(a, "2026-01-01T00:00:00Z") != mod.payload_fingerprint(a, "2026-01-02T00:00:00Z")
