@@ -61,7 +61,7 @@ const DISMISS_SENTINEL_CHOICE = '__dismissed__'
 // plugin id here doubles the segment: `/decision-hud/agent-dashboard` became
 // `/api/plugins/decision-hud/decision-hud/agent-dashboard` -> 404 "No such
 // API endpoint". The backend HTTP service's own route
-// (backend/agent_dashboard/service/http_app.py, _ROUTE_PATH) is a separate,
+// (backend/agent_telemetry/service/http_app.py, _ROUTE_PATH) is a separate,
 // unscoped loopback path and is unaffected by this — only the gateway-facing
 // path passed to `rest()` needs the plugin-id segment dropped.
 const DASHBOARD_READ_MODEL_PATH = '/agent-dashboard'

@@ -229,8 +229,12 @@ def _agent_dashboard_auth_module():
     ~/.hermes/plugins/decision-hud is a DIFFERENT directory — decisions
     SQLite backend vs. the telemetry backend)."""
     override = os.environ.get("DECISION_HUD_BACKEND_AUTH_PATH")
+    # backend/agent_dashboard was renamed to backend/agent_telemetry (see
+    # AGENT_DASHBOARD_CONSOLIDATION_PLAN.md) — this default must track that
+    # rename or every fresh checkout hits "auth module not found" even
+    # though the file exists under its new package name.
     path = Path(override) if override else (
-        Path.home() / ".hermes" / "desktop-plugins" / "decision-hud" / "backend" / "agent_dashboard" / "service" / "auth.py"
+        Path.home() / ".hermes" / "desktop-plugins" / "decision-hud" / "backend" / "agent_telemetry" / "service" / "auth.py"
     )
     if not path.exists():
         raise ImportError(
