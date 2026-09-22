@@ -45,7 +45,7 @@ class DashboardStatus:
 
         if self.unavailable:
             return {
-                "schema_version": self.schema_version,
+                "schema_version": PLUGIN_SCHEMA_VERSION,
                 "scope": {"project_id": self.scope, "project_label": self.scope},
                 "freshness": {"state": "unavailable", "as_of": now.isoformat()},
                 "agents": [],

@@ -12,7 +12,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from agent_telemetry.dashboard.read_model import DashboardReadModel
+from agent_telemetry.dashboard.read_model import DashboardReadModel, PLUGIN_SCHEMA_VERSION
 
 SCOPE = "project:selected"
 
@@ -66,6 +66,7 @@ async def test_status_is_unavailable_when_backend_unreachable_never_fabricates()
     assert payload["freshness"]["state"] == "unavailable"
     assert payload["agents"] == []
     assert payload["metrics"] == []
+    assert payload["schema_version"] == PLUGIN_SCHEMA_VERSION
 
 
 @pytest.mark.asyncio
