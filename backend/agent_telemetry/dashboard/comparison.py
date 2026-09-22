@@ -84,6 +84,44 @@ class CrossSourceComparison:
         sidecar_snapshots = await self.repository.query_by_producer(producer="sidecars", limit=limit)
         return [normalize_snapshot(s) for s in (*kanban_snapshots, *sidecar_snapshots)]
 
+    async def status(self, *, limit: int = 500, baseline_path: str = "baseline") -> dict[str, Any]:
+        """Wave 2d panel payload: raw rows plus, for every non-baseline
+        `path` present in those rows, the derived comparator vocabulary
+        from `SIDECAR_RANKING_AND_EVALUATION_PLAN.md` against
+        `baseline_path`. Filtering to one path (`sidecar_active` vs
+        `baseline` vs `kanban_agent`) is a client-side concern — this
+        returns every path's numbers so the UI panel can filter without a
+        round trip.
+        """
+        rows = await self.rows(limit=limit)
+        active_paths = sorted({r.path for r in rows if r.path != baseline_path})
+        comparisons = {
+            path: {
+                "net_token_savings": net_token_savings(rows, baseline_path=baseline_path, active_path=path),
+                "avoidance_rate": avoidance_rate(rows, active_path=path),
+                "latency_delta_ms": latency_delta(rows, baseline_path=baseline_path, active_path=path),
+                "quality_retention": quality_retention(rows, baseline_path=baseline_path, active_path=path),
+            }
+            for path in active_paths
+        }
+        return {
+            "schema_version": "agent-dashboard-comparison.v1",
+            "baseline_path": baseline_path,
+            "rows": [
+                {
+                    "producer": r.producer,
+                    "path": r.path,
+                    "agent_id": r.agent_id,
+                    "input_tokens": r.input_tokens,
+                    "output_tokens": r.output_tokens,
+                    "latency_ms": r.latency_ms,
+                    "quality_score": r.quality_score,
+                }
+                for r in rows
+            ],
+            "comparisons": comparisons,
+        }
+
 
 def _tokens(rows: Iterable[ComparisonRow], path: str) -> tuple[int, int]:
     matched = [r for r in rows if r.path == path]

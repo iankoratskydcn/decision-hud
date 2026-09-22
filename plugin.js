@@ -431,6 +431,165 @@ function AgentMetricsPage({ rest }) {
 }
 // --- End Agent Metrics ---------------------------------------------------
 
+// --- Cost/Quality/Speed Comparison Panel (Wave 2d) ------------------------
+// Fed by Wave 1d's CrossSourceComparison read model (backend route sibling
+// to DASHBOARD_READ_MODEL_PATH — see http_app.py's _COMPARISON_ROUTE_PATH).
+// Reuses useProjectDashboardScope for the same board-scoped actor token as
+// AgentMetricsPage (this route still requires *a* valid token, even though
+// the comparison rows themselves are producer-tagged, not project-scoped —
+// see the backend route's own comment for why).
+const COMPARISON_ROUTE_PATH = '/decision-hud/agent-dashboard/comparison'
+const COMPARISON_REST_PATH = '/agent-dashboard/comparison'
+const COMPARISON_ALL_PATHS = '__all__'
+
+function validateComparisonSnapshot(value) {
+  if (!isDashboardRecord(value) || value.schema_version !== 'agent-dashboard-comparison.v1') {
+    throw new Error('comparison panel is unavailable')
+  }
+  if (!Array.isArray(value.rows) || !isDashboardRecord(value.comparisons)) {
+    throw new Error('comparison rows are unavailable')
+  }
+  return value
+}
+
+function formatComparisonNumber(value, unit) {
+  if (value === null || value === undefined) return 'n/a'
+  const rounded = Math.round(value * 100) / 100
+  return unit ? `${rounded} ${unit}` : String(rounded)
+}
+
+// Sidecar `quality_score` (and any path's, per the comparison contract) is
+// `null` for "not yet judged" — never a fabricated 0. Render that
+// distinctly rather than silently coercing to a bar at zero height.
+function ComparisonQualityBar({ score }) {
+  if (score === null || score === undefined) {
+    return jsx('span', { className: 'text-(--ui-text-tertiary)', children: 'not yet judged' })
+  }
+  const pct = Math.max(0, Math.min(100, score * 100))
+  return jsxs('div', {
+    style: { display: 'flex', alignItems: 'center', gap: '6px' },
+    children: [
+      jsx('div', {
+        style: { width: '80px', height: '6px', background: 'var(--ui-stroke-secondary)', borderRadius: '3px', overflow: 'hidden' },
+        children: jsx('div', { style: { width: `${pct}%`, height: '100%', background: 'var(--ui-accent, #4a9)' } }),
+      }),
+      jsx('span', { children: score.toFixed(2) }),
+    ],
+  })
+}
+
+function ComparisonRowItem({ row }) {
+  return jsxs('div', {
+    'data-comparison-row': 'true',
+    style: { display: 'grid', gridTemplateColumns: '1fr 1fr 1fr 1fr 1fr 1fr', gap: '8px', padding: '4px 0', fontSize: '12px', alignItems: 'center' },
+    children: [
+      jsx('span', { children: row.producer }),
+      jsx('span', { children: row.path }),
+      jsx('span', { children: row.agent_id }),
+      jsx('span', { children: `${row.input_tokens ?? 'n/a'} in / ${row.output_tokens ?? 'n/a'} out` }),
+      jsx('span', { children: formatComparisonNumber(row.latency_ms, 'ms') }),
+      jsx(ComparisonQualityBar, { score: row.quality_score }),
+    ],
+  })
+}
+
+function ComparisonDerivedMetrics({ path, metrics }) {
+  return jsxs('div', {
+    'data-comparison-derived': path,
+    style: { border: '1px solid var(--ui-stroke-secondary)', borderRadius: '8px', padding: '10px 12px', minWidth: '220px' },
+    children: [
+      jsx('div', { style: { fontWeight: 600, marginBottom: '6px' }, children: path }),
+      jsx('div', { style: { fontSize: '12px' }, children: `Net token savings: ${metrics.net_token_savings.input} in / ${metrics.net_token_savings.output} out` }),
+      jsx('div', { style: { fontSize: '12px' }, children: `Avoidance rate: ${formatComparisonNumber(metrics.avoidance_rate)}` }),
+      jsx('div', { style: { fontSize: '12px' }, children: `Latency delta: ${formatComparisonNumber(metrics.latency_delta_ms, 'ms')}` }),
+      jsx('div', { style: { fontSize: '12px' }, children: `Quality retention: ${formatComparisonNumber(metrics.quality_retention)}` }),
+    ],
+  })
+}
+
+function ComparisonPanelBody({ snapshot, pathFilter, onPathFilterChange }) {
+  const allPaths = React.useMemo(() => [...new Set(snapshot.rows.map((r) => r.path))].sort(), [snapshot.rows])
+  const filteredRows = pathFilter === COMPARISON_ALL_PATHS ? snapshot.rows : snapshot.rows.filter((r) => r.path === pathFilter)
+  const comparisonEntries = Object.entries(snapshot.comparisons)
+  return jsxs('div', {
+    children: [
+      jsxs('div', {
+        style: { display: 'flex', alignItems: 'center', gap: '8px', marginBottom: '12px' },
+        children: [
+          jsx('span', { className: 'font-medium', children: 'Filter path:' }),
+          jsx(Select, {
+            value: pathFilter,
+            onValueChange: onPathFilterChange,
+            children: [
+              jsx(SelectTrigger, { children: jsx(SelectValue, {}) }),
+              jsxs(SelectContent, {
+                children: [
+                  jsx(SelectItem, { value: COMPARISON_ALL_PATHS, children: 'All paths' }, COMPARISON_ALL_PATHS),
+                  ...allPaths.map((path) => jsx(SelectItem, { value: path, children: path }, path)),
+                ],
+              }),
+            ],
+          }),
+        ],
+      }),
+      comparisonEntries.length === 0
+        ? jsx(DashboardMessageState, { children: 'No non-baseline paths to compare yet' })
+        : jsx('div', {
+            style: { display: 'flex', flexWrap: 'wrap', gap: '12px', marginBottom: '16px' },
+            children: comparisonEntries.map(([path, metrics]) => jsx(ComparisonDerivedMetrics, { path, metrics }, path)),
+          }),
+      jsx('div', { className: 'font-medium', children: 'Rows' }),
+      filteredRows.length === 0
+        ? jsx(DashboardMessageState, { children: 'No rows for this filter' })
+        : jsx('div', { role: 'list', children: filteredRows.map((row, i) => jsx(ComparisonRowItem, { row }, `${row.producer}-${row.path}-${row.agent_id}-${i}`)) }),
+    ],
+  })
+}
+
+function ComparisonPanel({ rest }) {
+  const [state, setState] = React.useState({ loading: true, snapshot: null, error: null })
+  const [pathFilter, setPathFilter] = React.useState(COMPARISON_ALL_PATHS)
+  const scope = useProjectDashboardScope()
+  React.useLayoutEffect(() => {
+    let active = true
+    if (scope.loading) {
+      setState({ loading: true, snapshot: null, error: null })
+      return () => { active = false }
+    }
+    if (!scope.projectId) {
+      setState({ loading: false, snapshot: null, error: scope.error || 'Select a board in Decision HUD to scope the comparison panel' })
+      return () => { active = false }
+    }
+    if (!scope.token) {
+      setState({ loading: false, snapshot: null, error: scope.error || 'Unable to obtain a project-scoped actor token' })
+      return () => { active = false }
+    }
+    const query = { limit: DASHBOARD_MAX_ROWS, project_id: scope.projectId }
+    const headers = { Authorization: `Bearer ${scope.token}` }
+    rest(COMPARISON_REST_PATH, { method: 'GET', query, headers }).then((response) => {
+      const snapshot = validateComparisonSnapshot(response)
+      if (active) setState({ loading: false, snapshot, error: null })
+    }).catch((error) => {
+      if (active) setState({ loading: false, snapshot: null, error: String(error?.message || error) })
+    })
+    return () => { active = false }
+  }, [rest, scope.loading, scope.projectId, scope.token, scope.error])
+
+  return jsxs('section', {
+    'aria-label': 'Cost/Quality/Speed Comparison',
+    className: 'flex h-full flex-col gap-3 overflow-auto p-4 text-sm',
+    children: [
+      jsx('div', { className: 'font-medium', children: 'Cost/Quality/Speed Comparison' }),
+      state.loading
+        ? jsx(DashboardLoadingState, {})
+        : state.error
+          ? jsx(DashboardMessageState, { children: `Comparison unavailable: ${state.error}` })
+          : jsx(ComparisonPanelBody, { snapshot: state.snapshot, pathFilter, onPathFilterChange: setPathFilter }),
+    ],
+  })
+}
+// --- End Cost/Quality/Speed Comparison Panel ------------------------------
+
 // F2 authorization: the desktop pane is the interactive-only resolution
 // surface, so it mints ONE actor token per pane session (lazily, on first
 // resolve) via `hermes decision issue-token` and holds the raw value only
@@ -5332,6 +5491,18 @@ export default {
         data: { codicon: 'pulse', label: 'Agent Matrix', path: AGENT_METRICS_WIDGETS_ROUTE_PATH },
       },
       {
+        id: 'comparison-panel-route',
+        area: ROUTES_AREA,
+        data: { path: COMPARISON_ROUTE_PATH },
+        render: () => jsx(ComparisonPanel, { rest: ctx.rest }),
+      },
+      {
+        id: 'comparison-panel-nav',
+        area: SIDEBAR_NAV_AREA,
+        order: 47,
+        data: { codicon: 'symbol-numeric', label: 'Cost/Quality/Speed', path: COMPARISON_ROUTE_PATH },
+      },
+      {
         id: 'decision-hud-open',
         area: PALETTE_AREA,
         data: {
@@ -5359,6 +5530,16 @@ export default {
           label: 'Agent Matrix: Open page',
           keywords: ['agent', 'matrix', 'charts', 'tradeoffs'],
           run: () => host.navigate(AGENT_METRICS_WIDGETS_ROUTE_PATH),
+        },
+      },
+      {
+        id: 'comparison-panel-open',
+        area: PALETTE_AREA,
+        data: {
+          id: 'decision-hud.comparison-panel',
+          label: 'Cost/Quality/Speed Comparison: Open page',
+          keywords: ['comparison', 'cost', 'quality', 'speed', 'sidecar', 'baseline'],
+          run: () => host.navigate(COMPARISON_ROUTE_PATH),
         },
       },
     ])
