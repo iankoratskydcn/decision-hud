@@ -260,6 +260,42 @@ function DashboardMessageState({ children }) {
   return jsx('div', { role: 'status', children })
 }
 
+// SectionErrorBoundary: same isolation pattern as CardErrorBoundary (see
+// that component's comment for the full rationale), applied to the two
+// top-level Agent Metrics sections instead of one decision card. Wave 2a
+// stacks the Postgres-backed dashboard section above the SQLite-backed
+// Agent Matrix section on one page; fetch failures are already isolated
+// per-section via each section's own useState/effect (see AgentMetricsPage
+// and AgentMetricsWidgetsPage), but an uncaught RENDER exception (e.g. a
+// snapshot that passes validation yet still breaks a body component) has
+// no boundary today and would unmount the whole page, including whatever
+// section is working fine. Wrapping each section's body in its own
+// boundary guarantees one backend's downtime — or a bug in reading its
+// data — can never blank the sibling section. No fabricated data: the
+// fallback states the failure plainly and renders nothing else.
+class SectionErrorBoundary extends React.Component {
+  constructor(props) {
+    super(props)
+    this.state = { hasError: false }
+  }
+
+  static getDerivedStateFromError() {
+    return { hasError: true }
+  }
+
+  componentDidCatch(error, info) {
+    // eslint-disable-next-line no-console
+    console.error('[decision-hud] section render error', this.props.sectionLabel, error, info)
+  }
+
+  render() {
+    if (this.state.hasError) {
+      return jsx(DashboardMessageState, { children: `${this.props.sectionLabel} unavailable: section failed to render` })
+    }
+    return this.props.children
+  }
+}
+
 // --- Agent Metrics (full-page route) ------------------------------------
 // Ported from the standalone agent-metrics scaffold plugin
 // (~/.hermes/desktop-plugins/agent-metrics/plugin.js) into this plugin per
@@ -425,7 +461,7 @@ function AgentMetricsPage({ rest }) {
     className: 'flex h-full flex-col gap-3 overflow-auto p-4 text-sm',
     children: [
       jsx('div', { className: 'font-medium', children: 'Agent Metrics' }),
-      state.loading ? jsx(DashboardLoadingState, {}) : state.error ? jsx(DashboardMessageState, { children: `Dashboard unavailable: ${state.error}` }) : jsx(AgentMetricsPageBody, { snapshot: state.snapshot }),
+      state.loading ? jsx(DashboardLoadingState, {}) : state.error ? jsx(DashboardMessageState, { children: `Dashboard unavailable: ${state.error}` }) : jsx(SectionErrorBoundary, { sectionLabel: 'Agent Metrics', children: jsx(AgentMetricsPageBody, { snapshot: state.snapshot }) }),
     ],
   })
 }
@@ -785,7 +821,7 @@ function AgentMetricsWidgetsPage() {
     className: 'flex h-full flex-col gap-3 overflow-auto p-4 text-sm',
     children: [
       jsx('div', { className: 'font-medium', children: 'Agent Metrics Widgets' }),
-      state.loading ? jsx(DashboardLoadingState, {}) : state.error ? jsx(DashboardMessageState, { children: `Agent metrics unavailable: ${state.error}` }) : jsx(AgentMetricsWidgetsBody, { snapshot: state.snapshot }),
+      state.loading ? jsx(DashboardLoadingState, {}) : state.error ? jsx(DashboardMessageState, { children: `Agent metrics unavailable: ${state.error}` }) : jsx(SectionErrorBoundary, { sectionLabel: 'Agent Metrics Widgets', children: jsx(AgentMetricsWidgetsBody, { snapshot: state.snapshot }) }),
     ],
   })
 }
