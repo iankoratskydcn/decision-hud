@@ -126,6 +126,40 @@ class PostgresMetricsRepository:
             snapshots.append(MetricSnapshot(row["payload"], row["record_id"]))
         return snapshots
 
+    async def query_by_producer(self, *, producer: str, limit: int = 500) -> list[MetricSnapshot]:
+        """Read-only fetch of the most recent snapshots for one `producer`, across all scopes.
+
+        Unlike `query_recent_metrics`, this intentionally is NOT scope-bound:
+        the cross-source cost/quality/speed comparison (Wave 1d) joins
+        `producer="kanban-sync"` and `producer="sidecars"` rows, which live
+        under different `scope` values by design (a Kanban project id vs the
+        sidecars repo's fixed `"sidecars"` scope) — there is no shared scope
+        to filter on. `query_recent_metrics`'s per-project scope isolation
+        (see test_dashboard_read_model_never_falls_back_across_projects) is
+        untouched; this is an additive, separately-scoped read path.
+        """
+        if not isinstance(producer, str) or not producer:
+            raise ValueError("producer is required")
+        if type(limit) is not int or limit < 1 or limit > self.max_limit:
+            raise ValueError(f"limit must be between 1 and {self.max_limit}")
+        conn = self._conn()
+        try:
+            async with conn.transaction():
+                cursor = await conn.execute(
+                    "SELECT payload, record_id FROM telemetry_snapshots WHERE payload->>'producer' = %s "
+                    "ORDER BY captured_at DESC, record_id DESC LIMIT %s",
+                    (producer, limit),
+                )
+                rows = await cursor.fetchall()
+        except Exception:
+            await conn.rollback()
+            raise
+        snapshots = []
+        for row in rows:
+            MetricSnapshot.from_dict(row["payload"])  # validate persisted data on read
+            snapshots.append(MetricSnapshot(row["payload"], row["record_id"]))
+        return snapshots
+
     async def list_scope_agent_ids(self, *, scope: str, limit: int = 500) -> list[str]:
         """Discover every agent_id with at least one checkpoint in `scope`.
 
