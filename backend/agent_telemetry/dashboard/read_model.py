@@ -33,24 +33,50 @@ class DashboardStatus:
     schema_version: str
     scope: str
     agents: list[AgentStatus]
+    #: True when the backend (Postgres) itself could not be reached — a
+    #: connectivity failure, distinct from "missing" (backend reachable, no
+    #: data for these agent_ids). Never combined with fabricated agents/
+    #: metrics: ``to_dict()`` returns empty lists in this case.
+    unavailable: bool = False
 
     def to_dict(self) -> dict[str, Any]:
         now = datetime.now(timezone.utc)
+
+        if self.unavailable:
+            return {
+                "schema_version": self.schema_version,
+                "scope": {"project_id": self.scope, "project_label": self.scope},
+                "freshness": {"state": "unavailable", "as_of": now.isoformat()},
+                "agents": [],
+                "metrics": [],
+            }
 
         # Top-level freshness reflects whether any telemetry data was
         # retrieved for the requested agents (data-presence), independent of
         # the per-agent staleness threshold, which is preserved internally on
         # each ``AgentStatus.freshness`` for finer-grained consumers.
+        # - "missing": no requested agent has any data at all.
+        # - "stale": every present agent's data is older than the freshness
+        #   threshold (Postgres is up, but nothing recent has synced).
+        # - "fresh": at least one present agent has recent data.
         latest_observed: datetime | None = None
         any_present = False
+        any_fresh = False
         for agent in self.agents:
             if agent.freshness.state != "missing":
                 any_present = True
+            if agent.freshness.state == "fresh":
+                any_fresh = True
             if agent.freshness.observed_at is not None and (
                 latest_observed is None or agent.freshness.observed_at > latest_observed
             ):
                 latest_observed = agent.freshness.observed_at
-        overall_state = "fresh" if any_present else "missing"
+        if not any_present:
+            overall_state = "missing"
+        elif any_fresh:
+            overall_state = "fresh"
+        else:
+            overall_state = "stale"
         as_of = (latest_observed or now).isoformat()
 
         agents_out = [
@@ -109,7 +135,16 @@ class DashboardReadModel:
         ids = list(agent_ids)
         if len(ids) > limit or len(ids) > self.max_limit or not all(isinstance(x, str) and x for x in ids):
             raise ValueError("agent_ids must be bounded non-empty strings and fit limit")
-        rows = await self.repository.query_recent_metrics(scope=scope, agent_ids=ids, limit=min(self.max_limit, max(limit * max(len(ids), 1), limit)))
+        try:
+            rows = await self.repository.query_recent_metrics(scope=scope, agent_ids=ids, limit=min(self.max_limit, max(limit * max(len(ids), 1), limit)))
+        except ValueError:
+            raise
+        except Exception:
+            # Postgres unreachable/down (connection refused, dropped mid-query,
+            # etc). Report the explicit `unavailable` state instead of letting
+            # the exception propagate into a raw 500/connection-reset, and
+            # never fabricate agents/metrics for a backend we couldn't reach.
+            return DashboardStatus("dashboard.read-model.v1", scope, [], unavailable=True)
         latest = {}
         for row in rows:
             latest.setdefault(row.agent_id, row)

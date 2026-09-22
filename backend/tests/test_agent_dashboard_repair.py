@@ -66,7 +66,10 @@ async def test_read_model_serializes_exact_plugin_v1_contract():
         "project_id": SCOPE,
         "project_label": SCOPE,
     }
-    assert serialized["freshness"]["state"] == "fresh"
+    # Fixture captured_at is far older than the default 5-minute freshness
+    # threshold, so under the explicit freshness contract (Wave 1b) this is
+    # "stale" (backend answered, data just isn't recent) — not "fresh".
+    assert serialized["freshness"]["state"] == "stale"
     assert isinstance(serialized["freshness"]["as_of"], str)
     assert serialized["agents"] == [
         {"agent_id": "agent-a", "label": "agent-a", "status": "running"}
