@@ -13,7 +13,14 @@ router = APIRouter()
 log = logging.getLogger(__name__)
 
 _BACKEND = Path.home() / ".hermes" / "desktop-plugins" / "decision-hud" / "backend"
-_AUTH_PATH = _BACKEND / "agent_dashboard" / "service" / "auth.py"
+# backend/agent_dashboard was renamed to backend/agent_telemetry (see
+# AGENT_DASHBOARD_CONSOLIDATION_PLAN.md Wave 0 step 1) — this constant and
+# _load_read_model()'s imports below must track that rename or every
+# request 500s with an ImportError swallowed by the broad except Exception
+# at the bottom of agent_dashboard(), surfacing as a misleading generic
+# "Agent Dashboard backend unavailable" 503 with no hint the real cause is
+# a stale module path, not Postgres being down.
+_AUTH_PATH = _BACKEND / "agent_telemetry" / "service" / "auth.py"
 
 
 def _load_auth():
@@ -37,8 +44,8 @@ def _load_read_model():
     backend = str(_BACKEND)
     if backend not in sys.path:
         sys.path.insert(0, backend)
-    from agent_dashboard.dashboard.read_model import DashboardReadModel
-    from agent_dashboard.db.postgres import PostgresMetricsRepository
+    from agent_telemetry.dashboard.read_model import DashboardReadModel
+    from agent_telemetry.db.postgres import PostgresMetricsRepository
 
     database_url = os.environ.get(
         "DASHBOARD_DATABASE_URL",
