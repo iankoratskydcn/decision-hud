@@ -3,6 +3,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
+from pathlib import Path
 from typing import Any, Iterable
 
 from agent_telemetry.db.postgres import MAX_LIMIT
@@ -102,6 +103,26 @@ class DashboardReadModel:
         self.repository = repository
         self.freshness_threshold = freshness_threshold
         self.max_limit = max_limit
+
+    @staticmethod
+    def live_snapshot(kanban_db_path: str | None = None, state_db_path: str | None = None) -> dict[str, Any]:
+        """Second, explicitly-labeled data path: Agent Matrix's live local
+
+        SQLite source (same data `hermes decision agent-metrics-snapshot`
+        serves), reusing ``scripts/agent_metrics_snapshot.py`` verbatim — no
+        second HTTP surface, no re-implementation. Its
+        ``schema_version`` (``agent-metrics-snapshot.v1``) is always distinct
+        from ``status()``'s Postgres-backed ``dashboard-read-model.v1``, so
+        callers can tag/join the two sources but must never blend them into
+        one number (see the Wave 1a owner decision on authority boundaries).
+        """
+        from scripts.agent_metrics_snapshot import DEFAULT_KANBAN_DB, DEFAULT_STATE_DB, build_snapshot
+
+        kanban_db_path = kanban_db_path or DEFAULT_KANBAN_DB
+        state_db_path = state_db_path or DEFAULT_STATE_DB
+        if not Path(state_db_path).exists():
+            state_db_path = None
+        return build_snapshot(kanban_db_path=kanban_db_path, state_db_path=state_db_path)
 
     async def status(self, *, scope: str, agent_ids: Iterable[str], limit: int = 100) -> DashboardStatus:
         if type(limit) is not int or limit < 1 or limit > self.max_limit:
