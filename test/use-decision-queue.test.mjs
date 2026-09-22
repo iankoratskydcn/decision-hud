@@ -8,12 +8,12 @@ const source = await readFile(resolve(here, '..', 'plugin.js'), 'utf8')
 
 assert.match(
   source,
-  /function useDecisionQueue\(projectId\)[\s\S]*?\}, \[projectId\]\)/,
-  'useDecisionQueue must memoize refresh from its projectId parameter',
+  /function useDecisionQueue\(projectId, limit\)[\s\S]*?\}, \[projectId, effectiveLimit\]\)/,
+  'useDecisionQueue must memoize refresh from its projectId and effectiveLimit parameters',
 )
 assert.doesNotMatch(
   source,
-  /function useDecisionQueue\(projectId\)[\s\S]*?\}, \[project\]\)/,
+  /function useDecisionQueue\(projectId, limit\)[\s\S]*?\}, \[project\]\)/,
   'useDecisionQueue must not reference the undeclared project identifier',
 )
 
