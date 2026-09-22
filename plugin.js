@@ -1116,13 +1116,19 @@ function useKanbanBoards() {
   return { ...state, refresh }
 }
 
-function useDecisionQueue(projectId) {
+// limit: how many pending decisions to fetch, so the grid can actually
+// fill to cols*rows cards. Was hardcoded to 5, which silently capped the
+// queue below a 3x3 (9-card) grid layout no matter how many decisions were
+// pending — the grid would show gaps or never exceed 5 cards even at a
+// larger layout. Caller passes gridLayout.cols*gridLayout.rows.
+function useDecisionQueue(projectId, limit) {
   const [state, setState] = React.useState({ decisions: [], projects: [], loading: true, error: null })
+  const effectiveLimit = Number.isInteger(limit) && limit > 0 ? limit : 5
 
   const refresh = React.useCallback(async () => {
     try {
       const [listRes, projRes] = await Promise.all([
-        cliExec(['decision', 'list', '--limit', '5', ...(projectId ? ['--project-id', projectId] : [])]),
+        cliExec(['decision', 'list', '--limit', String(effectiveLimit), ...(projectId ? ['--project-id', projectId] : [])]),
         cliExec(['decision', 'projects']),
       ])
       setState({
@@ -1134,7 +1140,7 @@ function useDecisionQueue(projectId) {
     } catch (e) {
       setState((s) => ({ ...s, loading: false, error: String(e.message || e) }))
     }
-  }, [projectId])
+  }, [projectId, effectiveLimit])
 
   React.useEffect(() => {
     refresh()
@@ -5324,7 +5330,7 @@ function DecisionHudPane({ rest }) {
     return board ? board.project_id || null : null
   }, [boards, boardForControls])
 
-  const { decisions, loading, error, refresh } = useDecisionQueue(selectedBoardProjectId)
+  const { decisions, loading, error, refresh } = useDecisionQueue(selectedBoardProjectId, gridLayout.cols * gridLayout.rows)
   const telemetry = useAgentTelemetryMetrics(selectedBoardProjectId, rest)
   const agentHealth = useAgentHealth(telemetry.byAgent)
   const availableMetrics = React.useMemo(
@@ -5552,10 +5558,22 @@ function DecisionHudPane({ rest }) {
                 // panes. Shows up to cols*rows cards; anything beyond
                 // that count stays in the queue and appears once a slot
                 // frees up on the next poll/resolve.
+                //
+                // gridAutoFlow: 'column' makes placement follow the
+                // `decisions` array in column-major order (index 0..rows-1
+                // fills col 1 top-to-bottom, rows..2*rows-1 fills col 2,
+                // etc). Once a card resolves it drops out of `decisions`
+                // and every later card's array index shifts down by one,
+                // which the browser then re-lays-out along that same
+                // column-major path — so cards below the resolved one
+                // slide up within their column, and the first card of the
+                // next column slides into the freed bottom slot, instead
+                // of the whole grid re-flowing row-by-row.
                 className: 'grid gap-3',
                 style: {
                   gridTemplateColumns: `repeat(${gridLayout.cols}, minmax(0, 1fr))`,
                   gridTemplateRows: `repeat(${gridLayout.rows}, auto)`,
+                  gridAutoFlow: 'column',
                 },
                 children: decisions
                   .slice(0, gridLayout.cols * gridLayout.rows)
