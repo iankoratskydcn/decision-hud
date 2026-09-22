@@ -7,3 +7,4 @@ __pycache__/
 *.db-wal
 backend-plugin/**/__pycache__/
 backend/.venv/
+.worktrees/
