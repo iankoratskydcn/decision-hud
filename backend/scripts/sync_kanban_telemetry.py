@@ -106,6 +106,15 @@ def build_checkpoints(
         ).fetchall()
         usage_by_task = _session_usage_by_task(conn, state_db_path)
         db_mtime = int(Path(kanban_db_path).stat().st_mtime)
+        # The payload also depends on state_db_path (cost/usage per task) —
+        # hashing kanban_db_path's mtime alone let state_db advance between
+        # ticks with kanban.db unchanged, producing a DIFFERENT payload
+        # under the SAME idempotency_key -> write_checkpoint's conflict
+        # guard hard-fails the whole sync instead of a clean no-op/new-row.
+        # Observed live: cron failing on ~most 5-15m ticks once state_db was
+        # updating between kanban.db writes.
+        state_path = Path(state_db_path) if state_db_path else None
+        state_mtime = int(state_path.stat().st_mtime) if state_path and state_path.exists() else 0
     finally:
         conn.close()
 
@@ -179,7 +188,7 @@ def build_checkpoints(
                 "raw_value": usage["api_call_count"], "value_type": "number", "unit": "count",
                 "category": _COST_LATENCY_CATEGORY,
             }
-        idempotency_key = hashlib.sha256(f"{scope}:{assignee}:{db_mtime}".encode()).hexdigest()
+        idempotency_key = hashlib.sha256(f"{scope}:{assignee}:{db_mtime}:{state_mtime}".encode()).hexdigest()
         # event_id/run_id/task_id are deterministic (uuid5 of idempotency_key),
         # not uuid4 random: a re-run against the SAME unchanged Kanban data must
         # produce the exact same payload for write_checkpoint's replay check to
