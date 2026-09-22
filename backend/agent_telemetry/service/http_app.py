@@ -33,7 +33,19 @@ from urllib.parse import urlsplit, parse_qs
 from agent_telemetry.service.auth import Forbidden, Unauthorized, authenticate_project_request
 
 _ROUTE_PATH = "/decision-hud/agent-dashboard"
+# Wave 2d: cost/quality/speed comparison panel, fed by Wave 1d's
+# CrossSourceComparison read model. A sibling route, not a query param on
+# _ROUTE_PATH, since its payload shape (rows + derived metrics) is
+# unrelated to DashboardStatus.to_dict() and it is intentionally NOT
+# project-scoped (see CrossSourceComparison/query_by_producer docstrings —
+# kanban-sync and sidecars rows live under different `scope` values, so
+# there is no single project scope to filter comparison rows by). Auth
+# still requires a valid project-scoped actor token (proves the caller is
+# an authenticated dashboard user), it just isn't used to filter this
+# route's data the way it filters _ROUTE_PATH's.
+_COMPARISON_ROUTE_PATH = "/decision-hud/agent-dashboard/comparison"
 _MAX_LIMIT_DEFAULT = 1000
+_DEFAULT_BASELINE_PATH = "baseline"
 
 
 def _run_async(coro):
@@ -42,7 +54,7 @@ def _run_async(coro):
     return asyncio.run(coro)
 
 
-def _make_handler(read_model):
+def _make_handler(read_model, comparison=None):
     class Handler(BaseHTTPRequestHandler):
         server_version = "AgentDashboardHTTP/1"
 
@@ -64,8 +76,26 @@ def _make_handler(read_model):
             token = header[len("Bearer "):].strip()
             return token or None
 
+        def _authenticate(self, project_id):
+            """Shared by both routes: validate the bearer token against
+            `project_id`, sending the matching error response and returning
+            False on failure so callers can `return` immediately."""
+            token = self._bearer_token()
+            try:
+                authenticate_project_request(token, project_id)
+            except Unauthorized as exc:
+                self._send_json(HTTPStatus.UNAUTHORIZED, {"error": str(exc)})
+                return False
+            except Forbidden as exc:
+                self._send_json(HTTPStatus.FORBIDDEN, {"error": str(exc)})
+                return False
+            return True
+
         def do_GET(self):  # noqa: N802 - stdlib method name
             parsed = urlsplit(self.path)
+            if parsed.path == _COMPARISON_ROUTE_PATH:
+                self._handle_comparison(parse_qs(parsed.query))
+                return
             if parsed.path != _ROUTE_PATH:
                 self._send_json(HTTPStatus.NOT_FOUND, {"error": "not found"})
                 return
@@ -75,14 +105,7 @@ def _make_handler(read_model):
             if not project_id:
                 self._send_json(HTTPStatus.BAD_REQUEST, {"error": "project_id query parameter is required"})
                 return
-            token = self._bearer_token()
-            try:
-                authenticate_project_request(token, project_id)
-            except Unauthorized as exc:
-                self._send_json(HTTPStatus.UNAUTHORIZED, {"error": str(exc)})
-                return
-            except Forbidden as exc:
-                self._send_json(HTTPStatus.FORBIDDEN, {"error": str(exc)})
+            if not self._authenticate(project_id):
                 return
 
             agent_ids = query.get("agent_ids", [])
@@ -109,6 +132,39 @@ def _make_handler(read_model):
 
             self._send_json(HTTPStatus.OK, status.to_dict())
 
+        def _handle_comparison(self, query):
+            if comparison is None:
+                self._send_json(HTTPStatus.NOT_FOUND, {"error": "not found"})
+                return
+            # This route is not project-scoped (see _COMPARISON_ROUTE_PATH
+            # comment), but still requires *a* valid, non-expired actor
+            # token bound to *some* project — any authenticated dashboard
+            # user's own project_id proves that, so reuse it as the
+            # authentication project claim without leaking cross-project
+            # comparison data (there is none; rows are producer-tagged, not
+            # project-tagged).
+            project_ids = query.get("project_id")
+            project_id = project_ids[0] if project_ids else None
+            if not project_id:
+                self._send_json(HTTPStatus.BAD_REQUEST, {"error": "project_id query parameter is required"})
+                return
+            if not self._authenticate(project_id):
+                return
+            limit_values = query.get("limit")
+            try:
+                limit = int(limit_values[0]) if limit_values else _MAX_LIMIT_DEFAULT
+            except ValueError:
+                self._send_json(HTTPStatus.BAD_REQUEST, {"error": "limit must be an integer"})
+                return
+            baseline_values = query.get("baseline_path")
+            baseline_path = baseline_values[0] if baseline_values else _DEFAULT_BASELINE_PATH
+            try:
+                payload = _run_async(comparison.status(limit=limit, baseline_path=baseline_path))
+            except ValueError as exc:
+                self._send_json(HTTPStatus.BAD_REQUEST, {"error": str(exc)})
+                return
+            self._send_json(HTTPStatus.OK, payload)
+
     return Handler
 
 
@@ -116,11 +172,16 @@ class LoopbackOnlyServer(ThreadingHTTPServer):
     allow_reuse_address = True
 
 
-def build_server(repository, *, host: str = "127.0.0.1", port: int = 0, read_model=None):
+def build_server(repository, *, host: str = "127.0.0.1", port: int = 0, read_model=None, comparison=None):
     """Build (but do not start) the HTTP server. `repository` is anything
     matching PostgresMetricsRepository's `query_recent_metrics` shape
     (DashboardReadModel's dependency); `read_model` may be supplied directly
-    for tests, otherwise one is constructed around `repository`."""
+    for tests, otherwise one is constructed around `repository`. `comparison`
+    (a `CrossSourceComparison`, Wave 1d) is optional — omitting it 404s
+    `_COMPARISON_ROUTE_PATH` rather than fabricating panel data; callers
+    that want the Wave 2d panel pass one built around the same `repository`
+    (it uses `query_by_producer`, a separate read path from
+    `query_recent_metrics`)."""
     if host not in ("127.0.0.1", "localhost", "::1"):
         raise ValueError(
             f"agent-dashboard HTTP service is loopback-only by design; refusing to bind host={host!r}"
@@ -129,7 +190,7 @@ def build_server(repository, *, host: str = "127.0.0.1", port: int = 0, read_mod
         from agent_telemetry.dashboard.read_model import DashboardReadModel
 
         read_model = DashboardReadModel(repository)
-    handler_cls = _make_handler(read_model)
+    handler_cls = _make_handler(read_model, comparison)
     server = LoopbackOnlyServer((host, port), handler_cls)
     return server
 
@@ -156,7 +217,12 @@ def main() -> None:  # pragma: no cover - manual/local run entrypoint
 
     repository = PostgresMetricsRepository(database_url)
     _run_async(repository.open())
-    server = build_server(repository, host="127.0.0.1", port=int(os.environ.get("DASHBOARD_HTTP_PORT", "8787")))
+    from agent_telemetry.dashboard.comparison import CrossSourceComparison
+
+    comparison = CrossSourceComparison(repository)
+    server = build_server(
+        repository, host="127.0.0.1", port=int(os.environ.get("DASHBOARD_HTTP_PORT", "8787")), comparison=comparison
+    )
     print(f"agent-dashboard HTTP service listening on http://127.0.0.1:{server.server_address[1]}{_ROUTE_PATH}")
     try:
         server.serve_forever()
