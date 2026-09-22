@@ -6,3 +6,4 @@ __pycache__/
 *.db-shm
 *.db-wal
 backend-plugin/**/__pycache__/
+backend/.venv/

@@ -10,7 +10,7 @@ import psycopg
 from psycopg.rows import dict_row
 from psycopg.types.json import Jsonb
 
-from agent_dashboard.domain.contracts import MetricSnapshot
+from agent_telemetry.domain.contracts import MetricSnapshot
 
 MAX_LIMIT = 10_000
 

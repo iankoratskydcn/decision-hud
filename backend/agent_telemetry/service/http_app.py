@@ -30,7 +30,7 @@ from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import urlsplit, parse_qs
 
-from agent_dashboard.service.auth import Forbidden, Unauthorized, authenticate_project_request
+from agent_telemetry.service.auth import Forbidden, Unauthorized, authenticate_project_request
 
 _ROUTE_PATH = "/decision-hud/agent-dashboard"
 _MAX_LIMIT_DEFAULT = 1000
@@ -126,7 +126,7 @@ def build_server(repository, *, host: str = "127.0.0.1", port: int = 0, read_mod
             f"agent-dashboard HTTP service is loopback-only by design; refusing to bind host={host!r}"
         )
     if read_model is None:
-        from agent_dashboard.dashboard.read_model import DashboardReadModel
+        from agent_telemetry.dashboard.read_model import DashboardReadModel
 
         read_model = DashboardReadModel(repository)
     handler_cls = _make_handler(read_model)
@@ -152,7 +152,7 @@ def main() -> None:  # pragma: no cover - manual/local run entrypoint
     database_url = os.environ.get("DASHBOARD_DATABASE_URL")
     if not database_url:
         raise SystemExit("DASHBOARD_DATABASE_URL is required to run the agent-dashboard HTTP service")
-    from agent_dashboard.db.postgres import PostgresMetricsRepository
+    from agent_telemetry.db.postgres import PostgresMetricsRepository
 
     repository = PostgresMetricsRepository(database_url)
     _run_async(repository.open())

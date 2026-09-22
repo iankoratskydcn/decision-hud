@@ -16,9 +16,9 @@ from uuid import uuid4
 
 import pytest
 
-from agent_dashboard.dashboard.read_model import DashboardReadModel
-from agent_dashboard.db.postgres import PostgresMetricsRepository
-from agent_dashboard.domain.contracts import MetricValue
+from agent_telemetry.dashboard.read_model import DashboardReadModel
+from agent_telemetry.db.postgres import PostgresMetricsRepository
+from agent_telemetry.domain.contracts import MetricValue
 
 
 SCOPE = "project:selected"

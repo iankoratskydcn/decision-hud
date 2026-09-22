@@ -1,7 +1,7 @@
 """RED-first tests for the Kanban -> Postgres telemetry.v1 sync bridge.
 
-The Postgres-backed dashboard read model (agent_dashboard.db.postgres,
-agent_dashboard.dashboard.read_model) is real, tested infrastructure — but
+The Postgres-backed dashboard read model (agent_telemetry.db.postgres,
+agent_telemetry.dashboard.read_model) is real, tested infrastructure — but
 nothing writes real telemetry.v1 checkpoints into it; the only rows in the
 live DB are hand-inserted test fixtures (scope='project:test-selected').
 This script is the missing producer: it reads the SAME real Kanban
@@ -36,7 +36,7 @@ def _module():
         pytest.fail(f"scripts/sync_kanban_telemetry.py is absent: {exc}")
 
 
-def _make_kanban_db(path: Path) -> None:
+def _make_kanban_db(path: Path, *, with_sessions: bool = False) -> None:
     conn = sqlite3.connect(str(path))
     conn.executescript(
         """
@@ -55,8 +55,10 @@ def _make_kanban_db(path: Path) -> None:
         """
     )
     now = int(time.time())
-    conn.execute("INSERT INTO tasks VALUES ('t1', 'Task 1', 'builder', 'done', NULL, ?)", (now,))
-    conn.execute("INSERT INTO tasks VALUES ('t2', 'Task 2', 'builder', 'done', NULL, ?)", (now,))
+    t1_session = "sess-t1" if with_sessions else None
+    t2_session = "sess-t2" if with_sessions else None
+    conn.execute("INSERT INTO tasks VALUES ('t1', 'Task 1', 'builder', 'done', ?, ?)", (t1_session, now))
+    conn.execute("INSERT INTO tasks VALUES ('t2', 'Task 2', 'builder', 'done', ?, ?)", (t2_session, now))
     conn.execute("INSERT INTO tasks VALUES ('t3', 'Task 3', 'reviewer', 'blocked', NULL, ?)", (now,))
     conn.execute(
         "INSERT INTO task_runs (task_id, profile, status, outcome, started_at, ended_at) VALUES "
@@ -70,6 +72,23 @@ def _make_kanban_db(path: Path) -> None:
         "INSERT INTO task_runs (task_id, profile, status, outcome, started_at, ended_at) VALUES "
         "('t3', 'reviewer', 'blocked', 'blocked', ?, NULL)", (now - 300,),
     )
+    conn.commit()
+    conn.close()
+
+
+def _make_state_db(path: Path) -> None:
+    """A minimal state.db with just the sessions columns the sync reads."""
+    conn = sqlite3.connect(str(path))
+    conn.execute(
+        """
+        CREATE TABLE sessions (
+            id TEXT PRIMARY KEY, input_tokens INTEGER DEFAULT 0, output_tokens INTEGER DEFAULT 0,
+            estimated_cost_usd REAL, actual_cost_usd REAL, api_call_count INTEGER DEFAULT 0
+        )
+        """
+    )
+    conn.execute("INSERT INTO sessions VALUES ('sess-t1', 1000, 200, 0.05, 0.04, 3)")
+    conn.execute("INSERT INTO sessions VALUES ('sess-t2', 500, 100, 0.02, NULL, 2)")
     conn.commit()
     conn.close()
 
@@ -103,9 +122,45 @@ def test_build_checkpoints_groups_all_outcomes_per_assignee_into_one_snapshot(tm
     assert "blocked_avg_duration_s" not in reviewer["values"]
 
     # every payload must be independently valid per contracts.MetricSnapshot
-    contracts = importlib.import_module("agent_dashboard.domain.contracts")
+    contracts = importlib.import_module("agent_telemetry.domain.contracts")
     for payload in checkpoints:
         contracts.MetricSnapshot.from_dict(payload)
+
+
+def test_build_checkpoints_joins_session_token_cost_latency_when_state_db_given(tmp_path):
+    mod = _module()
+    kanban_db_path = tmp_path / "kanban.db"
+    state_db_path = tmp_path / "state.db"
+    _make_kanban_db(kanban_db_path, with_sessions=True)
+    _make_state_db(state_db_path)
+
+    checkpoints = mod.build_checkpoints(
+        kanban_db_path=str(kanban_db_path), state_db_path=str(state_db_path), scope="p_test123",
+    )
+    by_agent = {c["agent_id"]: c for c in checkpoints}
+    builder = by_agent["builder"]
+
+    # builder's two task_runs (t1 -> sess-t1, t2 -> sess-t2) roll up together.
+    assert builder["values"]["input_tokens"]["raw_value"] == 1500
+    assert builder["values"]["output_tokens"]["raw_value"] == 300
+    assert builder["values"]["estimated_cost_usd"]["raw_value"] == pytest.approx(0.07)
+    assert builder["values"]["actual_cost_usd"]["raw_value"] == pytest.approx(0.04)
+    assert builder["values"]["api_call_count"]["raw_value"] == 5
+    assert builder["values"]["input_tokens"]["category"] == "model_cost_latency"
+
+    # reviewer's run has no session_id -> no model_cost_latency values fabricated.
+    reviewer = by_agent["reviewer"]
+    assert "input_tokens" not in reviewer["values"]
+
+
+def test_build_checkpoints_without_state_db_skips_cost_latency_values(tmp_path):
+    mod = _module()
+    kanban_db_path = tmp_path / "kanban.db"
+    _make_kanban_db(kanban_db_path, with_sessions=True)
+
+    checkpoints = mod.build_checkpoints(kanban_db_path=str(kanban_db_path), state_db_path=None, scope="p_test123")
+    by_agent = {c["agent_id"]: c for c in checkpoints}
+    assert "input_tokens" not in by_agent["builder"]["values"]
 
 
 def test_build_checkpoints_is_read_only_never_writes_kanban_db(tmp_path):
@@ -148,7 +203,7 @@ def postgres_url():
 @pytest.mark.asyncio
 async def test_sync_writes_checkpoints_readable_via_public_repository_api(tmp_path, postgres_url):
     mod = _module()
-    postgres = importlib.import_module("agent_dashboard.db.postgres")
+    postgres = importlib.import_module("agent_telemetry.db.postgres")
     db_path = tmp_path / "kanban.db"
     _make_kanban_db(db_path)
     scope = f"p_synctest_{int(time.time())}"

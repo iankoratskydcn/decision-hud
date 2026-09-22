@@ -54,11 +54,11 @@ def _plugin_db_module():
 
 def _service_modules():
     try:
-        auth = importlib.import_module("agent_dashboard.service.auth")
-        http_app = importlib.import_module("agent_dashboard.service.http_app")
+        auth = importlib.import_module("agent_telemetry.service.auth")
+        http_app = importlib.import_module("agent_telemetry.service.http_app")
     except ModuleNotFoundError as exc:
         pytest.fail(
-            "agent_dashboard.service (auth/http_app) is absent; implement "
+            "agent_telemetry.service (auth/http_app) is absent; implement "
             f"the loopback authenticated HTTP service before this suite can pass ({exc})"
         )
     return auth, http_app

@@ -5,7 +5,7 @@ from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from typing import Any, Iterable
 
-from agent_dashboard.db.postgres import MAX_LIMIT
+from agent_telemetry.db.postgres import MAX_LIMIT
 
 
 @dataclass(frozen=True)

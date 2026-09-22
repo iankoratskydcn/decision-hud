@@ -21,12 +21,12 @@ OTHER_SCOPE = "project:test-other"
 def _contract():
     """Load the intended contract and turn absence into a diagnostic RED failure."""
     try:
-        contracts = importlib.import_module("agent_dashboard.domain.contracts")
-        postgres = importlib.import_module("agent_dashboard.db.postgres")
-        read_model = importlib.import_module("agent_dashboard.dashboard.read_model")
+        contracts = importlib.import_module("agent_telemetry.domain.contracts")
+        postgres = importlib.import_module("agent_telemetry.db.postgres")
+        read_model = importlib.import_module("agent_telemetry.dashboard.read_model")
     except ModuleNotFoundError as exc:
         pytest.fail(
-            "backend contract is absent; implement agent_dashboard domain, "
+            "backend contract is absent; implement agent_telemetry domain, "
             f"PostgreSQL repository, and read model before running this suite ({exc})"
         )
     for module, names in (
