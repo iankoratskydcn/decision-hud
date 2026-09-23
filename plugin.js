@@ -1407,6 +1407,14 @@ function CardHeader({ decision, onDismiss, resolving }) {
       jsxs('div', {
         className: 'flex items-center gap-2',
         children: [
+          decision.card_type
+            ? jsx('span', {
+                className: 'rounded px-1.5 py-0.5 font-medium text-(--ui-text-tertiary)',
+                style: { border: '1px dashed var(--ui-stroke-secondary)' },
+                title: 'Rendering card_type (see decision-hud-cards taxonomy)',
+                children: decision.card_type,
+              })
+            : null,
           jsx('span', {
             style: { color: URGENCY_COLOR[decision.urgency] || URGENCY_COLOR.normal },
             children: safeText(decision.urgency),
