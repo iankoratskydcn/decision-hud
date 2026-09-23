@@ -1140,6 +1140,8 @@ function AgentDashboardCombinedPage({ rest }) {
   const scope = useProjectDashboardScope()
   const [readModel, setReadModel] = React.useState({ loading: true, snapshot: null, error: null })
   const [widgets, setWidgets] = React.useState({ loading: true, snapshot: null, error: null })
+  const [comparison, setComparison] = React.useState({ loading: true, snapshot: null, error: null })
+  const [comparisonPathFilter, setComparisonPathFilter] = React.useState(COMPARISON_ALL_PATHS)
 
   React.useLayoutEffect(() => {
     let active = true
@@ -1181,6 +1183,35 @@ function AgentDashboardCombinedPage({ rest }) {
     return () => { active = false }
   }, [])
 
+  // Wave 4: Cost/Quality/Speed is a focus WITHIN Agent Matrix (an analysis
+  // lens over the same producer-tagged rows), not a separate nav
+  // destination — same board-scoped token, own independent fetch/error
+  // state so this section's outage never blanks the other two.
+  React.useLayoutEffect(() => {
+    let active = true
+    if (scope.loading) {
+      setComparison({ loading: true, snapshot: null, error: null })
+      return () => { active = false }
+    }
+    if (!scope.projectId) {
+      setComparison({ loading: false, snapshot: null, error: scope.error || 'Select a board in Decision HUD to scope the comparison panel' })
+      return () => { active = false }
+    }
+    if (!scope.token) {
+      setComparison({ loading: false, snapshot: null, error: scope.error || 'Unable to obtain a project-scoped actor token' })
+      return () => { active = false }
+    }
+    const query = { limit: DASHBOARD_MAX_ROWS, project_id: scope.projectId }
+    const headers = { Authorization: 'Bearer ' + scope.token }
+    rest(COMPARISON_REST_PATH, { method: 'GET', query, headers }).then((response) => {
+      const snapshot = validateComparisonSnapshot(response)
+      if (active) setComparison({ loading: false, snapshot, error: null })
+    }).catch((error) => {
+      if (active) setComparison({ loading: false, snapshot: null, error: String(error?.message || error) })
+    })
+    return () => { active = false }
+  }, [rest, scope.loading, scope.projectId, scope.token, scope.error])
+
   return jsxs('section', {
     'aria-label': 'Agent Dashboard',
     className: 'flex h-full flex-col gap-4 overflow-auto p-4 text-sm',
@@ -1198,6 +1229,18 @@ function AgentDashboardCombinedPage({ rest }) {
         children: [
           jsx('div', { className: 'font-medium', children: 'Agent Matrix' }),
           widgets.loading ? jsx(DashboardLoadingState, {}) : widgets.error ? jsx(DashboardMessageState, { children: `Agent metrics unavailable: ${widgets.error}` }) : jsx(AgentMetricsWidgetsBody, { snapshot: widgets.snapshot }),
+        ],
+      }),
+      jsx(Separator, {}),
+      jsxs('div', {
+        'data-dashboard-section': 'comparison',
+        children: [
+          jsx('div', { className: 'font-medium', children: 'Cost/Quality/Speed' }),
+          comparison.loading
+            ? jsx(DashboardLoadingState, {})
+            : comparison.error
+              ? jsx(DashboardMessageState, { children: `Comparison unavailable: ${comparison.error}` })
+              : jsx(ComparisonPanelBody, { snapshot: comparison.snapshot, pathFilter: comparisonPathFilter, onPathFilterChange: setComparisonPathFilter }),
         ],
       }),
     ],
@@ -6127,12 +6170,6 @@ export default {
         area: ROUTES_AREA,
         data: { path: COMPARISON_ROUTE_PATH },
         render: () => jsx(ComparisonPanel, { rest: ctx.rest }),
-      },
-      {
-        id: 'comparison-panel-nav',
-        area: SIDEBAR_NAV_AREA,
-        order: 47,
-        data: { codicon: 'symbol-numeric', label: 'Cost/Quality/Speed', path: COMPARISON_ROUTE_PATH },
       },
       {
         id: 'decision-hud-open',
