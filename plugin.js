@@ -4580,6 +4580,75 @@ function useKanbanEscalationScope() {
   return { ...state, refresh, save }
 }
 
+// useKanbanCompletionToasts: persisted foreground-toast preference consumed
+// by the desktop Kanban plugin before it emits terminal-event notifications.
+function useKanbanCompletionToasts() {
+  const [state, setState] = React.useState({ loading: true, enabled: true, error: null })
+  const refresh = React.useCallback(async () => {
+    setState((s) => ({ ...s, loading: true, error: null }))
+    try {
+      const res = await cliExec(['decision', 'settings-get'])
+      const s = (res && res.settings) || {}
+      setState({ loading: false, enabled: s.kanban_completion_toasts !== '0', error: null })
+    } catch (e) {
+      setState((s) => ({ ...s, loading: false, error: String(e.message || e) }))
+    }
+  }, [])
+  React.useEffect(() => { refresh() }, [refresh])
+  const save = React.useCallback(async (enabled) => {
+    await cliExec(['decision', 'settings-set', 'kanban_completion_toasts', enabled ? '1' : '0'])
+    setState((s) => ({ ...s, enabled }))
+  }, [])
+  return { ...state, refresh, save }
+}
+
+function KanbanNotificationsTab() {
+  const { loading, enabled, error, save } = useKanbanCompletionToasts()
+  const [saving, setSaving] = React.useState(false)
+
+  const handleToggle = React.useCallback(async () => {
+    setSaving(true)
+    try {
+      await save(!enabled)
+      host.notify({ kind: 'success', message: `Kanban task toasts ${enabled ? 'disabled' : 'enabled'}` })
+    } catch (e) {
+      host.notify({ kind: 'error', message: String(e.message || e) })
+    } finally {
+      setSaving(false)
+    }
+  }, [enabled, save])
+
+  return jsxs('section', {
+    className: 'flex flex-col gap-3',
+    children: [
+      jsx('div', { className: 'text-sm font-medium', children: 'Kanban Notifications' }),
+      jsx('p', {
+        className: 'text-[0.8rem] text-(--ui-text-secondary)',
+        children: 'Control the foreground toast shown when a Kanban task completes, blocks, times out, crashes, or is routed to triage. Native OS notifications have a separate Hermes setting.',
+      }),
+      error ? jsx('div', { className: 'text-[0.75rem] text-(--ui-danger,#e5484d)', children: error }) : null,
+      jsxs('label', {
+        className: 'flex items-center justify-between gap-3 rounded border border-(--ui-stroke-secondary) p-2 text-[0.8rem]',
+        children: [
+          jsxs('span', {
+            className: 'flex flex-col',
+            children: [
+              jsx('span', { className: 'font-medium', children: 'Show Kanban task toasts' }),
+              jsx('span', { className: 'text-(--ui-text-tertiary)', children: 'Disable this to hide the in-app completion cards.' }),
+            ],
+          }),
+          jsx(ToggleSwitch, {
+            checked: enabled,
+            disabled: loading || saving,
+            onClick: handleToggle,
+            label: 'Show Kanban task toasts',
+          }),
+        ],
+      }),
+    ],
+  })
+}
+
 // useTelemetrySyncInterval: configurable interval for the
 // "decision-hud telemetry checkpoint sync (all boards)" cron job
 // (~/.hermes/scripts/sync-decision-hud-telemetry.sh, see
@@ -5047,6 +5116,12 @@ function SettingsFullscreen({ isOpen, onClose, layout, onGridChange, sidebarSett
                 }),
                 jsx('button', {
                   type: 'button',
+                  onClick: () => setActiveTab('kanban-notifications'),
+                  className: `rounded px-2 py-1.5 text-left text-[0.8rem] ${activeTab === 'kanban-notifications' ? 'bg-(--chrome-action-hover) text-foreground' : 'text-(--ui-text-tertiary) hover:bg-(--chrome-action-hover)'}`,
+                  children: 'Kanban Notifications',
+                }),
+                jsx('button', {
+                  type: 'button',
                   onClick: () => setActiveTab('telemetry-sync'),
                   className: `rounded px-2 py-1.5 text-left text-[0.8rem] ${activeTab === 'telemetry-sync' ? 'bg-(--chrome-action-hover) text-foreground' : 'text-(--ui-text-tertiary) hover:bg-(--chrome-action-hover)'}`,
                   children: 'Telemetry Sync',
@@ -5059,6 +5134,8 @@ function SettingsFullscreen({ isOpen, onClose, layout, onGridChange, sidebarSett
                 ? jsx(SubagentRulesTab, { availableMetrics })
                 : activeTab === 'kanban-escalation'
                 ? jsx(KanbanEscalationScopeTab, {})
+                : activeTab === 'kanban-notifications'
+                ? jsx(KanbanNotificationsTab, {})
                 : activeTab === 'telemetry-sync'
                 ? jsx(TelemetrySyncIntervalTab, {})
                 : jsxs('section', {

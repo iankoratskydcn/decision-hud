@@ -682,6 +682,10 @@ _SETTINGS_KEYS = {
     "subagent_inject_enabled": "1",
     "subagent_inject_rule": INJECT_DEFAULT_RULE,
     "subagent_inject_skills": "[]",
+    # Controls the foreground Kanban terminal-event toasts emitted by the
+    # Hermes desktop Kanban plugin. Keep enabled by default for compatibility;
+    # the plugin reads this setting live before each notification.
+    "kanban_completion_toasts": "1",
     # Which kanban_block()/kanban_request_review() calls should auto-push a
     # Decision HUD card: 'off' (never), 'needs_input' (only reason kind
     # needs_input, i.e. genuine owner decisions — capability/transient/
