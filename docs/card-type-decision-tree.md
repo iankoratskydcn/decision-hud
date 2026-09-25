@@ -153,7 +153,7 @@ needs ≥2 items, so there's no single-item ordinal cell).
 
 | value type ↓ / structure → | Single item | Independent set (each item decided on its own) | Constrained set (items bound together — sum, comparison, sequence, pairing) |
 |---|---|---|---|
-| **Continuous** (a number) | `scalar_slider`, `range_slider`, `confidence_rating`, `anchor_adjust` | ⚠️ **gap — see below** | `constrained_budget_split`, `stacked_bar_split`, `spider_compare`, `weighted_allocation`* |
+| **Continuous** (a number) | `scalar_slider`, `range_slider`, `confidence_rating`, `anchor_adjust` | ⚠️ gap — proposed `rating_grid`, see below | `constrained_budget_split`, `stacked_bar_split`, `spider_compare`, `weighted_allocation`* |
 | **Categorical** (a label) | `quad_choice`, `zone_select`, `mcq_context`, `mode_radial_gauge` | `multi_select`, `sort_to_bin`, `tree_placement`, `matrix_2x2`, `assemble_pieces` | `balance_scale`, `pairwise_duel` |
 | **Ordinal** (relative position) | — | — | `sequence_order`, `timeline_placement` |
 | **Relational** (pairing / membership across sets) | — | — | `wire_match`, `venn_overlap` |
@@ -169,7 +169,15 @@ no sum constraint and no cross-item comparison (e.g. "rate each of these 5
 features 1–10, no total, not compared to each other"). Every existing
 continuous card_type is either single-item or ties items together. If that
 pattern comes up, it currently has no `card_type` — falls back to
-`card_type=None`.
+`card_type=None`. Proposed fix: a new `rating_grid` card_type — see
+[`docs/proposals/rating-grid-card-type.md`](proposals/rating-grid-card-type.md)
+for the exact rule-table edit and renderer.
+
+The other two dead ends noted below ("pick exactly one of N", and
+`compare_tradeoff` with one dominant criterion) aren't proposed as new
+card types — the plain button list already serves "pick one of N" well,
+and a single dominant criterion is really just a sorted list, not a
+distinct card shape.
 
 ## Gaps
 
