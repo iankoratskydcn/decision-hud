@@ -143,6 +143,34 @@ A diamond with no `F` arrow is a dead end: answering `F` there gives
 | 23 | `mcq_context` | none_of_these | Nothing above fits; multiple choice with context |
 | 24 | `weighted_allocation` | — | ⚠ Renderer exists, no gate rule (see Gaps) |
 
+## Coverage matrix
+
+Same 24 types, cut a different way: **value type** (what kind of answer
+each item gets) × **structure** (how many items, and whether they're
+decided independently or jointly). Cells hold every card_type that fits;
+`—` marks a combination that's structurally impossible (e.g. "ordinal"
+needs ≥2 items, so there's no single-item ordinal cell).
+
+| value type ↓ / structure → | Single item | Independent set (each item decided on its own) | Constrained set (items bound together — sum, comparison, sequence, pairing) |
+|---|---|---|---|
+| **Continuous** (a number) | `scalar_slider`, `range_slider`, `confidence_rating`, `anchor_adjust` | ⚠️ **gap — see below** | `constrained_budget_split`, `stacked_bar_split`, `spider_compare`, `weighted_allocation`* |
+| **Categorical** (a label) | `quad_choice`, `zone_select`, `mcq_context`, `mode_radial_gauge` | `multi_select`, `sort_to_bin`, `tree_placement`, `matrix_2x2`, `assemble_pieces` | `balance_scale`, `pairwise_duel` |
+| **Ordinal** (relative position) | — | — | `sequence_order`, `timeline_placement` |
+| **Relational** (pairing / membership across sets) | — | — | `wire_match`, `venn_overlap` |
+
+\* `weighted_allocation` has no gate rule — see [Gaps](#gaps).
+
+`context_readout` (info_only) isn't on the grid — no value is being
+chosen, so it has no value type.
+
+**Real gap found:** nothing covers **Continuous × Independent set** — a
+card where each of several items gets its own number, independently, with
+no sum constraint and no cross-item comparison (e.g. "rate each of these 5
+features 1–10, no total, not compared to each other"). Every existing
+continuous card_type is either single-item or ties items together. If that
+pattern comes up, it currently has no `card_type` — falls back to
+`card_type=None`.
+
 ## Gaps
 
 Found while building this tree; not fixed here.
